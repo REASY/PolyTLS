@@ -79,7 +79,7 @@ impl UpstreamProfile {
     pub fn firefox_145_macos_arm64() -> Self {
         // https://github.com/mozilla-firefox/firefox/blob/b82cded8c5b732c2ea15b7871d14e13b5fadeffd/security/nss/lib/ssl/sslsock.c#L4255
         Self {
-            alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
+            alpn_protos: vec!["http/1.1".to_string()],
             grease: false,
             enable_ech_grease: true,
             permute_extensions: false,
@@ -100,7 +100,7 @@ impl UpstreamProfile {
 
     pub fn safari_26_2_macos_arm64() -> Self {
         Self {
-            alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
+            alpn_protos: vec!["http/1.1".to_string()],
             grease: true,
             enable_ech_grease: false,
             permute_extensions: false,
