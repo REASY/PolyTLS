@@ -1,0 +1,43 @@
+[package]
+authors = ["Artavazd Balaian <reasyu@gmail.com>"]
+edition = "2024"
+license = "MIT"
+name = "polytls"
+readme = "README.md"
+rust-version = "1.92.0"
+version = "0.1.0"
+
+[dependencies]
+boring = { version = "4", features = ["pq-experimental"] }
+boring-sys = "4"
+brotli = "8"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+gethostname = "1.1.0"
+httparse = "1"
+local-ip-address = "0.6.6"
+memchr = "2"
+opentelemetry = "0.31.0"
+opentelemetry-appender-tracing = "0.31.1"
+opentelemetry-otlp = "0.31.0"
+opentelemetry-resource-detectors = "0.10.0"
+opentelemetry-semantic-conventions = "0.31.0"
+opentelemetry_sdk = {  version = "0.31.0", features = ["default", "spec_unstable_metrics_views"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-boring = "4"
+tokio-util = { version = "0.7", features = ["codec"] }
+toml = "0.9.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+scudo = "0.1"
+
+[profile.release]
+debug = true

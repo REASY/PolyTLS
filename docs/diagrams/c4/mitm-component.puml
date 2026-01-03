@@ -1,0 +1,42 @@
+@startuml
+!include <C4/C4>
+!include <C4/C4_Context>
+!include <C4/C4_Container>
+!include <C4/C4_Component>
+
+title PolyTLS MITM proxy - C4 Component diagram
+LAYOUT_TOP_DOWN()
+
+Person(client, "Proxy Client", "Browser / curl")
+System_Ext(upstream, "Upstream TLS Server", "Target host:port")
+
+System_Boundary(polytls, "PolyTLS (Rust + Tokio)") {
+  Component(parser, "CONNECT Parser", "src/http_connect.rs", "Parses HTTP/1.1 CONNECT and captures leftover bytes.")
+  Component(profiles, "Upstream Profile Selector", "src/profile.rs", "Selects an upstream TLS profile per request and caches SslConnector(s).")
+  Component(responder, "HTTP Responder", "src/proxy.rs", "Writes 200 (tunnel established) or 4xx/5xx errors.")
+  Component(prefix, "PrefixedStream", "src/prefixed_stream.rs", "Replays leftover bytes before reading the socket.")
+  Component(ca, "CA Manager", "src/ca.rs", "Mints per-host leaf certificates from the MITM root CA.")
+  Component(client_tls, "Client TLS Terminator", "tokio-boring/boring", "Accepts client TLS using the minted leaf certificate.")
+  Component(sni_check, "SNI Check", "src/mitm.rs", "Ensures CONNECT host matches ClientHello SNI.")
+  Component(up_tls, "Upstream TLS Connector", "src/proxy.rs", "Origins TLS to upstream using the selected profile (tokio-boring/boring).")
+  Component(tunnel, "Tunnel Copier", "src/proxy.rs", "Verifies negotiated ALPN and relays plaintext application bytes (tokio::io::copy_bidirectional).")
+}
+
+Rel(client, parser, "CONNECT host:port", "TCP / HTTP/1.1")
+Rel(parser, profiles, "requested profile (optional)", "X-PolyTLS-Upstream-Profile")
+Rel(parser, responder, "Status mapping", "200 / 4xx / 5xx")
+Rel(responder, client, "Connection Established", "HTTP/1.1")
+
+Rel(parser, prefix, "leftover bytes", "bytes")
+Rel(prefix, client_tls, "ClientHello and app data", "TLS over TCP")
+Rel(profiles, client_tls, "ALPN protos", "TLS ALPN")
+Rel(ca, client_tls, "Leaf cert + key", "X.509")
+Rel(client_tls, sni_check, "ClientHello SNI", "metadata")
+
+Rel(sni_check, up_tls, "Authorizes upstream connect", "host")
+Rel(profiles, up_tls, "SslConnector", "profile")
+Rel(up_tls, upstream, "Connect + handshake", "TCP + TLS (SNI=host)")
+
+Rel(client_tls, tunnel, "Plaintext app bytes", "AsyncRead/AsyncWrite")
+Rel(up_tls, tunnel, "Plaintext app bytes", "AsyncRead/AsyncWrite")
+@enduml

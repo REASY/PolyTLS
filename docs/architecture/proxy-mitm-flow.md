@@ -1,0 +1,78 @@
+# MITM CONNECT flow (`handle_mitm`)
+
+Primary implementation: [`src/proxy.rs:148`](../../src/proxy.rs#L148).
+
+## Data path overview
+- Client → proxy: HTTP/1.1 `CONNECT`, then TLS is terminated by the proxy.
+- Proxy → upstream: a new TCP connection, then a new upstream TLS session is originated by the proxy.
+- Proxy relays decrypted application bytes between the two TLS sessions.
+
+## Diagram
+
+### System diagram
+![mitm-context](../diagrams/c4/mitm-context.png)
+
+Diagram source: [mitm-context.puml](../diagrams/c4/mitm-context.puml).
+
+
+### Component diagram
+
+![mitm-component.png](../diagrams/c4/mitm-component.png)
+
+Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
+
+## Step-by-step
+1. Read and parse the client's `CONNECT host:port` request; keep any bytes read past `\r\n\r\n` as `connect.leftover` ([`src/proxy.rs:149`](../../src/proxy.rs#L149), [`src/http_connect.rs:36`](../../src/http_connect.rs#L36)).
+   - Optional: extract `X-PolyTLS-Upstream-Profile` to select an upstream TLS profile ([`src/http_connect.rs:7`](../../src/http_connect.rs#L7), [`src/http_connect.rs:84`](../../src/http_connect.rs#L84)).
+2. Select the upstream TLS profile and fetch/build a cached `SslConnector` (unknown profile → `400`, other failures → `502`) ([`src/proxy.rs:157`](../../src/proxy.rs#L157), [`src/profile.rs:158`](../../src/profile.rs#L158)).
+3. Dial upstream TCP with a timeout; send `502`/`504` on connect/timeout failures ([`src/proxy.rs:184`](../../src/proxy.rs#L184)).
+4. Reply `HTTP/1.1 200 Connection Established` ([`src/proxy.rs:201`](../../src/proxy.rs#L201)).
+5. Load the selected `UpstreamProfile` (mainly for the ALPN list used on the client-facing TLS acceptor) ([`src/proxy.rs:203`](../../src/proxy.rs#L203), [`src/profile.rs:154`](../../src/profile.rs#L154)).
+6. Wrap the client socket in `PrefixedStream(connect.leftover, client)` so the next stage sees a contiguous stream ([`src/proxy.rs:212`](../../src/proxy.rs#L212), [`src/prefixed_stream.rs:1`](../../src/prefixed_stream.rs#L1)).
+7. Mint a per-host leaf certificate from the MITM CA, build a TLS server acceptor, then complete the TLS handshake with the client ([`src/proxy.rs:213`](../../src/proxy.rs#L213), [`src/ca.rs:91`](../../src/ca.rs#L91), [`src/mitm.rs:16`](../../src/mitm.rs#L16)).
+8. Validate that the client's SNI matches the CONNECT host ([`src/proxy.rs:220`](../../src/proxy.rs#L220), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
+9. Configure and connect upstream TLS using the selected profile and verification policy ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/profile.rs:217`](../../src/profile.rs#L217)).
+10. Ensure the client and upstream negotiated compatible ALPN to avoid protocol confusion:
+    - If both sides negotiated ALPN, it must match (e.g., `h2` ↔ `h2`).
+    - If upstream did not negotiate ALPN (`<none>`), treat it as compatible with `http/1.1` (some servers omit ALPN when selecting default HTTP/1.1).
+    - Otherwise abort. ([`src/proxy.rs:237`](../../src/proxy.rs#L237)).
+11. Relay application bytes until shutdown using `tokio::io::copy_bidirectional` ([`src/proxy.rs:259`](../../src/proxy.rs#L259)).
+
+## Why `copy_bidirectional` works here
+After both TLS handshakes complete, `tokio_boring::accept` and `tokio_boring::connect` return streams implementing `AsyncRead + AsyncWrite` where reads/writes are *plaintext application bytes*. TLS record parsing, encryption, and re-framing happen inside each TLS stream, so the proxy can treat them as generic full‑duplex byte streams and just pump bytes in both directions.
+
+## Why `PrefixedStream` exists
+`read_connect_request` can read past the end of the CONNECT headers (e.g., into the start of the tunneled data). In MITM mode that "tunneled data" begins with the client's TLS ClientHello. `PrefixedStream` replays those `leftover` bytes first, so no bytes are lost and the next protocol stage sees the correct byte sequence.
+
+## Certificates and trust model (why `CaManager` exists)
+In MITM mode, the proxy is a TLS server *from the client's perspective*. That means it must present a certificate that:
+- matches the hostname the client thinks it's connecting to (e.g., `example.com`), and
+- chains to a trust anchor the client trusts.
+
+The proxy does not have the upstream server's private key, so it cannot legitimately present the upstream's real certificate. Instead, `CaManager` ([`src/ca.rs`](../../src/ca.rs)) acts as a local CA:
+- It loads or creates the proxy's **Root CA** keypair and certificate (default: [`ca/private.key`](../../ca/private.key) and [`ca/certificate.pem`](../../ca/certificate.pem)).
+- For each CONNECT host it "mints" a per-host **leaf certificate** (end-entity/server certificate) signed by that Root CA ([`CaManager::leaf_for_host`](../../src/ca.rs#L91)), and uses that leaf cert+key to accept the client's TLS handshake.
+
+**Leaf certificate**: the server/end-entity certificate at the bottom of a certificate chain (Root CA → leaf). It's the certificate the proxy presents to the client for a specific host.
+
+### Who must trust what
+- **Client → proxy (MITM TLS)**: to avoid `curl -k/--insecure` / browser warnings, install the proxy's Root CA certificate (e.g., [`ca/certificate.pem`](../../ca/certificate.pem)) into the *client* trust store. This allows the minted per-host leaf certs to validate normally.
+- **Proxy → upstream (upstream TLS)**: this is a separate verification path inside the proxy. Client-side insecure flags do not affect it. For lab/private-CA upstreams, configure the proxy with `proxy.upstream.ca_file` (preferred) or disable upstream verification (`proxy.upstream.insecure_skip_verify`, lab only).
+
+## Per-request upstream TLS profiles
+The proxy can select the upstream TLS ClientHello profile per CONNECT request using an optional header:
+
+- Header: `X-PolyTLS-Upstream-Profile: <profile-name>`
+- Curl example (adds a header to the CONNECT request):
+  - `curl --proxy-header 'X-PolyTLS-Upstream-Profile: chrome-143-macos-arm64' --insecure -x http://127.0.0.1:8080 https://example.com/`
+
+Profiles are configured in TOML under the `[profiles]` table ([`src/config.rs:7`](../../src/config.rs#L7)). If the header is not present, the proxy uses `proxy.upstream.default_profile` ([`src/config.rs:44`](../../src/config.rs#L44)).
+
+## BoringSSL named groups limitation (FFDHE)
+Some browser fingerprints (e.g., Firefox) advertise finite-field Diffie-Hellman named groups like `ffdhe2048` / `ffdhe3072` in `supported_groups`.
+
+In PolyTLS, these values are applied via BoringSSL's `set_curves_list` (supported groups) ([`src/profile.rs:264`](../../src/profile.rs#L264)). With the current BoringSSL version, `set_curves_list` only accepts group names present in BoringSSL's internal `kNamedGroups` table, and the lookup path rejects unknown names:
+- `kNamedGroups` table: https://github.com/google/boringssl/blob/a6f3c4c14e6515c8c7f213032be8dee3f18a9b19/ssl/ssl_key_share.cc#L438
+- `ssl_name_to_group_id` lookup: https://github.com/google/boringssl/blob/a6f3c4c14e6515c8c7f213032be8dee3f18a9b19/ssl/ssl_key_share.cc#L496-L511
+
+As a result, attempting to configure `ffdhe2048`/`ffdhe3072` via `curves_list` fails, and reproducing Firefox's full `supported_groups` list would require patching/forking BoringSSL rather than just configuration.

@@ -1,0 +1,17 @@
+@startuml
+!include <C4/C4>
+!include <C4/C4_Context>
+
+title PolyTLS MITM proxy - C4 System Context
+LAYOUT_TOP_DOWN()
+
+Person(client, "Client", "Browser / curl")
+System(proxy, "MITM Proxy (PolyTLS)", "HTTP/1.1 CONNECT proxy that terminates client TLS and originates upstream TLS.")
+System_Ext(target, "Target Server", "Upstream service")
+System(ca, "PolyTLS Root CA", "Root CA certificate+key on disk; on-the-fly per-host leaf certificate generation")
+
+Rel(client, proxy, "Proxies requests via CONNECT; TLS1 terminated at proxy", "TCP / HTTP/1.1 + TLS")
+Rel(proxy, target, "Forwards traffic; TLS2 originated by proxy", "TCP + TLS")
+Rel(proxy, ca, "Uses Root CA to mint per-host leaf certificates (client-facing TLS)", "X.509 signing")
+Rel(client, ca, "Installs Root CA certificate (to avoid browser/curl warnings)", "OS / browser trust store")
+@enduml
