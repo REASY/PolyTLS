@@ -17,32 +17,15 @@ Note: this only affects Rust allocations. The callback itself allocates output v
 ## Prerequisites
 
 - Nightly toolchain: `rustup toolchain install nightly`
-- Optional (instrument std too): `rustup component add rust-src --toolchain nightly`
 
-## Running tests under ASan / LSan / TSan
+## Sanitized runs (Nightly)
 
-Use [`scripts/sanitizer-test.sh`](../../scripts/sanitizer-test.sh):
+You can run the proxy or tests with sanitizers (address, leak) using the provided script.
 
-- AddressSanitizer (ASan): `bash scripts/sanitizer-test.sh asan`
-- LeakSanitizer (LSan): `bash scripts/sanitizer-test.sh lsan`
-- ThreadSanitizer (TSan): `bash scripts/sanitizer-test.sh tsan`
+```bash
+# Run with address sanitizer
+./scripts/sanitized.sh address run -- --config config/example.toml
 
-TSan requires rebuilding the standard library with the same sanitizer to avoid ABI-mismatch errors. [`scripts/sanitizer-test.sh`](../../scripts/sanitizer-test.sh) automatically enables `-Zbuild-std` for `tsan` (requires `rust-src`).
-
-To run only the zstd callback tests:
-
-`bash scripts/sanitizer-test.sh asan test raw_ssl_cert_decompress_zstd`
-
-To also build an instrumented standard library:
-
-`bash scripts/sanitizer-test.sh asan -Zbuild-std raw_ssl_cert_decompress_zstd`
-
-## Running the proxy under ASan
-
-`bash scripts/sanitizer-test.sh asan run -- --config config/example.toml`
-
-## macOS note: "Interceptors are not working"
-
-On Apple platforms, sanitizer runtimes strip `DYLD_INSERT_LIBRARIES` for child processes by default. This breaks `cargo test` with ASan when `rustc` later `dlopen`s ASan-instrumented proc-macro dylibs.
-
-[`scripts/sanitizer-test.sh`](../../scripts/sanitizer-test.sh) sets `*SAN_OPTIONS=strip_env=0` so `DYLD_INSERT_LIBRARIES` stays active for `rustc` and the test binary.
+# Run tests with leak sanitizer
+./scripts/sanitized.sh leak test
+```
