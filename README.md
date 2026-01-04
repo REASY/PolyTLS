@@ -7,6 +7,45 @@ An explicit HTTP/1.1 `CONNECT` proxy that can run in:
 
 Docs: [docs/README.md](docs/README.md). Use this only on systems and traffic you own or are explicitly authorized to test.
 
+## Architecture
+
+PolyTLS is an explicit HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile").
+
+```ascii
+MITM mode (terminates client TLS):
+
+┌─────────┐  HTTP/1.1 CONNECT + TLS1 (terminated)  ┌─────────────┐   TLS2 (originated)    ┌──────────────┐
+│ Client  │ ──────────────────────────────────────►│ MITM Proxy  │ ────────────────────►  │ Target Server│
+│         │ ◄──────────────────────────────────────│             │ ◄────────────────────  │              │
+└─────────┘            Decrypted / Relayed         └─────────────┘     Decrypted / Relayed└──────────────┘
+                                 │
+                                 └──────────────────────────────────┐
+                                                                    │
+                                      ┌─────────────────────────────┴─────────────────────────────┐
+                                      │                 Certificate Authority (CA)                │
+                                      │              (On-the-fly leaf cert generation)            │
+                                      └───────────────────────────────────────────────────────────┘
+
+Passthrough mode (tunnels TLS end-to-end):
+
+┌─────────┐  HTTP/1.1 CONNECT + TLS (tunneled)  ┌─────────────┐   TCP relay          ┌──────────────┐
+│ Client  │ ───────────────────────────────────►│ Proxy       │ ───────────────────► │ Target Server│
+│         │ ◄───────────────────────────────────│             │ ◄─────────────────── │              │
+└─────────┘          Encrypted / Relayed        └─────────────┘  Encrypted / Relayed └──────────────┘
+```
+
+See the full step-by-step flow (including the `PrefixedStream` "leftover bytes" trick and the ALPN compatibility check): [`docs/architecture/proxy-mitm-flow.md`](docs/architecture/proxy-mitm-flow.md)
+
+### MITM flow (TL;DR)
+
+1. Parse `CONNECT` (+ optional `X-PolyTLS-Upstream-Profile`).
+2. Reply `200 Connection Established`.
+3. Load/generate Root CA → mint leaf cert for `host`.
+4. TLS-accept client using minted cert.
+5. TLS-connect upstream using a chosen profile.
+6. Enforce ALPN compatibility.
+7. Bidirectional relay until EOF.
+
 ## Build
 
 ```bash
