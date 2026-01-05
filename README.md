@@ -7,6 +7,12 @@ An **explicit** HTTP/1.1 `CONNECT` proxy that can run in:
 
 Docs: [docs/README.md](docs/README.md). Use this only on systems and traffic you own or are explicitly authorized to test.
 
+## Demo
+
+[PolyTLS.mp4](docs/demo/PolyTLS.mp4)
+
+![curl.png](docs/demo/curl.png)
+
 ## Architecture
 
 PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile").
