@@ -1,6 +1,6 @@
 # PolyTLS
 
-An explicit HTTP/1.1 `CONNECT` proxy that can run in:
+An **explicit** HTTP/1.1 `CONNECT` proxy that can run in:
 
 - **Passthrough mode**: tunnels bytes (no TLS termination).
 - **MITM mode**: terminates client TLS and originates a new upstream TLS connection using **BoringSSL** via `boring` + `tokio-boring`.
@@ -9,15 +9,15 @@ Docs: [docs/README.md](docs/README.md). Use this only on systems and traffic you
 
 ## Architecture
 
-PolyTLS is an explicit HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile").
+PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile").
 
 ```ascii
 MITM mode (terminates client TLS):
 
-┌─────────┐  HTTP/1.1 CONNECT + TLS1 (terminated)  ┌─────────────┐   TLS2 (originated)    ┌──────────────┐
-│ Client  │ ──────────────────────────────────────►│ MITM Proxy  │ ────────────────────►  │ Target Server│
-│         │ ◄──────────────────────────────────────│             │ ◄────────────────────  │              │
-└─────────┘            Decrypted / Relayed         └─────────────┘     Decrypted / Relayed└──────────────┘
+┌─────────┐  HTTP/1.1 CONNECT + Client TLS (terminated)  ┌─────────────┐   Upstream TLS (originated)    ┌──────────────┐
+│ Client  │ ────────────────────────────────────────────►│ MITM Proxy  │ ─────────────────────────────► │ Target Server│
+│         │ ◄────────────────────────────────────────────│             │ ◄────────────────────────────  │              │
+└─────────┘            Decrypted / Relayed               └─────────────┘     Decrypted / Relayed        └──────────────┘
                                  │
                                  └──────────────────────────────────┐
                                                                     │
@@ -42,9 +42,22 @@ See the full step-by-step flow (including the `PrefixedStream` "leftover bytes" 
 2. Reply `200 Connection Established`.
 3. Load/generate Root CA → mint leaf cert for `host`.
 4. TLS-accept client using minted cert.
-5. TLS-connect upstream using a chosen profile.
+5. TLS-connect upstream (default profile or selected profile).
 6. Enforce ALPN compatibility.
 7. Bidirectional relay until EOF.
+
+## Why
+
+Sometimes the thing you're debugging isn't your HTTP request – it's the **TLS handshake** that happens *before* any HTTP exists. CDNs, WAFs, bot defenses, and "smart" load balancers can behave differently depending on the client's TLS characteristics.
+
+PolyTLS is a small, explicit `CONNECT` proxy that helps you test that reality:
+
+- **Passthrough mode**: tunnel bytes as-is (no TLS termination).
+- **MITM mode**: terminate client TLS, then open a *new* upstream TLS connection.
+- **Upstream TLS profiles**: pick an upstream "browser-like" TLS profile per request (so you can A/B behavior across profiles without changing your client).
+
+Use it for **authorized testing / reproducible debugging**: "does this endpoint break only when the handshake looks like X?", "does the origin negotiate a different protocol?", "why does a vendor SDK work but curl doesn't?".
+
 
 ## Build
 
