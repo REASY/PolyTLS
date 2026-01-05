@@ -13,6 +13,7 @@ boring-sys = "4"
 brotli = "8"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
+foreign-types = "0.5"
 gethostname = "1.1.0"
 httparse = "1"
 local-ip-address = "0.6.6"

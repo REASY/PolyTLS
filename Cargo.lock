@@ -1222,6 +1222,7 @@ dependencies = [
  "brotli",
  "clap",
  "flate2",
+ "foreign-types",
  "gethostname",
  "httparse",
  "local-ip-address",

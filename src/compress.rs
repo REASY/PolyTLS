@@ -1,5 +1,6 @@
 use crate::error::{ErrorKind, Result};
 use boring::ssl::{CertificateCompressionAlgorithm, CertificateCompressor, SslContextBuilder};
+use foreign_types::ForeignType;
 use std::collections::HashSet;
 use std::io;
 
@@ -140,6 +141,13 @@ fn register_zstd_cert_decompressor(builder: &mut SslContextBuilder) -> Result<()
     Ok(())
 }
 
+foreign_types::foreign_type! {
+    unsafe type CryptoBuffer {
+        type CType = boring_sys::CRYPTO_BUFFER;
+        fn drop = boring_sys::CRYPTO_BUFFER_free;
+    }
+}
+
 unsafe extern "C" fn raw_ssl_cert_decompress_zstd(
     _ssl: *mut boring_sys::SSL,
     out: *mut *mut boring_sys::CRYPTO_BUFFER,
@@ -168,21 +176,15 @@ unsafe extern "C" fn raw_ssl_cert_decompress_zstd(
             unsafe { std::slice::from_raw_parts(input, input_len) }
         };
 
-        struct CryptoBufferGuard(*mut boring_sys::CRYPTO_BUFFER);
-
-        impl Drop for CryptoBufferGuard {
-            fn drop(&mut self) {
-                unsafe { boring_sys::CRYPTO_BUFFER_free(self.0) };
-            }
-        }
-
         let mut data: *mut u8 = std::ptr::null_mut();
         let buffer = unsafe { boring_sys::CRYPTO_BUFFER_alloc(&mut data, uncompressed_len) };
-        if buffer.is_null() || data.is_null() {
-            unsafe { boring_sys::CRYPTO_BUFFER_free(buffer) };
+        if buffer.is_null() {
             return 0;
         }
-        let mut buffer_guard = CryptoBufferGuard(buffer);
+        let buffer = unsafe { CryptoBuffer::from_ptr(buffer) };
+        if data.is_null() {
+            return 0;
+        }
 
         let output_slice = unsafe { std::slice::from_raw_parts_mut(data, uncompressed_len) };
         let written = match zstd::bulk::decompress_to_buffer(input_slice, output_slice) {
@@ -194,8 +196,7 @@ unsafe extern "C" fn raw_ssl_cert_decompress_zstd(
             return 0;
         }
 
-        unsafe { *out = buffer_guard.0 };
-        buffer_guard.0 = std::ptr::null_mut();
+        unsafe { *out = buffer.into_ptr() };
         1
     }));
 
