@@ -4,7 +4,7 @@ WORKDIR /app
 
 # System deps to compile Rust crates that may need native deps
 RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends cmake libclang-dev && \
+    apt-get install -y --no-install-recommends build-essential cmake libclang-dev && \
     rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 
