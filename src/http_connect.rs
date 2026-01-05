@@ -50,7 +50,9 @@ where
 
         let n = stream.read(&mut tmp).await?;
         if n == 0 {
-            return Err(ConnectError::UnexpectedEof { bytes_read: buf.len() });
+            return Err(ConnectError::UnexpectedEof {
+                bytes_read: buf.len(),
+            });
         }
         buf.extend_from_slice(&tmp[..n]);
 

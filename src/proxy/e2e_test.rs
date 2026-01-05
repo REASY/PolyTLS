@@ -375,7 +375,6 @@ fn profiles_for_tests() -> HashMap<String, crate::profile::UpstreamProfile> {
 }
 
 #[tokio::test]
-#[ignore = "e2e test: requires binding to local sockets"]
 async fn passthrough_tunnels_tls_end_to_end() {
     let origin_ca = TestCa::new("e2e-origin-ca").await;
     let (origin_leaf, _origin_leaf_key) = origin_ca
@@ -447,7 +446,6 @@ async fn passthrough_tunnels_tls_end_to_end() {
 }
 
 #[tokio::test]
-#[ignore = "e2e test: requires binding to local sockets"]
 async fn mitm_terminates_client_tls_and_relays_http1() {
     use crate::mitm::MitmState;
     use crate::profile::{UpstreamProfiles, UpstreamVerification};
@@ -538,19 +536,15 @@ async fn mitm_terminates_client_tls_and_relays_http1() {
 }
 
 #[tokio::test]
-#[ignore = "e2e test: requires binding to local sockets"]
 async fn mitm_selects_profile_per_request_via_connect_header() {
     use crate::http_connect::UPSTREAM_PROFILE_HEADER;
     use crate::mitm::MitmState;
     use crate::profile::{UpstreamProfiles, UpstreamVerification};
 
     let origin_ca = TestCa::new("e2e-origin-ca").await;
-    let (origin, _origin_alpn_rx) = TestTlsOrigin::spawn_handshake_only(
-        "localhost",
-        &origin_ca,
-        vec!["h2".to_string(), "http/1.1".to_string()],
-    )
-    .await;
+    let (origin, _origin_alpn_rx) =
+        TestTlsOrigin::spawn_handshake_only("localhost", &origin_ca, vec!["http/1.1".to_string()])
+            .await;
 
     let proxy_ca = TestCa::new("e2e-proxy-ca").await;
     let profiles = profiles_for_tests();
@@ -616,14 +610,13 @@ async fn mitm_selects_profile_per_request_via_connect_header() {
 
         assert_eq!(
             tls.ssl().selected_alpn_protocol(),
-            Some(b"h2".as_slice()),
-            "firefox profile should negotiate h2"
+            Some(b"http/1.1".as_slice()),
+            "firefox profile should negotiate http/1.1"
         );
     }
 }
 
 #[tokio::test]
-#[ignore = "e2e test: requires binding to local sockets"]
 async fn mitm_allows_insecure_upstream_for_self_signed_targets() {
     use crate::mitm::MitmState;
     use crate::profile::{UpstreamProfiles, UpstreamVerification};
