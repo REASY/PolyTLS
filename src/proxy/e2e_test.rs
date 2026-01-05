@@ -355,6 +355,49 @@ async fn open_connect_tunnel(
     stream
 }
 
+async fn send_raw_request(proxy_addr: SocketAddr, request: &[u8]) -> Vec<u8> {
+    let mut stream = TcpStream::connect(proxy_addr)
+        .await
+        .expect("client should connect to proxy");
+    stream
+        .write_all(request)
+        .await
+        .expect("request should be written");
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        let read_res = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut tmp)).await;
+        let n = match read_res {
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => panic!("response should be read: {err}"),
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if memchr::memmem::find(&buf, b"\r\n\r\n").is_some() {
+            break;
+        }
+        if buf.len() > 64 * 1024 {
+            break;
+        }
+    }
+
+    buf
+}
+
+fn status_line(buf: &[u8]) -> String {
+    let first_line_end = memchr::memmem::find(buf, b"\r\n").unwrap_or_else(|| {
+        panic!(
+            "response should have status line: {:?}",
+            String::from_utf8_lossy(buf)
+        )
+    });
+    String::from_utf8_lossy(&buf[..first_line_end]).to_string()
+}
+
 fn profiles_for_tests() -> HashMap<String, crate::profile::UpstreamProfile> {
     use crate::profile::UpstreamProfile;
 
@@ -724,4 +767,355 @@ async fn mitm_allows_insecure_upstream_for_self_signed_targets() {
         );
         assert!(resp.ends_with("insecure-ok"), "unexpected body: {resp:?}");
     }
+}
+
+#[tokio::test]
+async fn connect_rejects_unsupported_method_with_405() {
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Passthrough,
+    })
+    .await;
+
+    let resp = send_raw_request(
+        proxy.addr(),
+        b"GET example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+    )
+    .await;
+
+    assert!(
+        status_line(&resp).starts_with("HTTP/1.1 405 "),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn connect_rejects_invalid_authority_with_400() {
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Passthrough,
+    })
+    .await;
+
+    let resp = send_raw_request(proxy.addr(), b"CONNECT example.com HTTP/1.1\r\n\r\n").await;
+
+    assert!(
+        status_line(&resp).starts_with("HTTP/1.1 400 "),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn connect_rejects_too_large_request_with_431() {
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Passthrough,
+    })
+    .await;
+
+    let mut req = Vec::new();
+    req.extend_from_slice(b"CONNECT example.com:443 HTTP/1.1\r\n");
+    req.extend_from_slice(b"Host: example.com:443\r\n");
+    req.extend_from_slice(b"X-Fill: ");
+    req.extend_from_slice(&vec![b'a'; 20 * 1024]);
+
+    let resp = send_raw_request(proxy.addr(), &req).await;
+
+    assert!(
+        status_line(&resp).starts_with("HTTP/1.1 431 "),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn mitm_rejects_unknown_upstream_profile_with_400() {
+    use crate::mitm::MitmState;
+    use crate::profile::{UpstreamProfiles, UpstreamVerification};
+
+    let proxy_ca = TestCa::new("e2e-proxy-ca").await;
+    let profiles = profiles_for_tests();
+    let upstream_profiles = UpstreamProfiles::new("chrome-143-macos-arm64".to_string(), profiles)
+        .expect("profiles should be valid");
+    let upstream_verification = UpstreamVerification::default();
+
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Mitm(MitmState {
+            ca: proxy_ca.manager.clone(),
+            upstream_profiles,
+            upstream_verification,
+        }),
+    })
+    .await;
+
+    let resp = send_raw_request(
+        proxy.addr(),
+        b"CONNECT example.com:443 HTTP/1.1\r\n\
+Host: example.com:443\r\n\
+X-PolyTLS-Upstream-Profile: definitely-not-a-profile\r\n\
+\r\n",
+    )
+    .await;
+
+    assert!(
+        status_line(&resp).starts_with("HTTP/1.1 400 "),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn passthrough_returns_502_when_upstream_connect_fails() {
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Passthrough,
+    })
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind temp port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+
+    let authority = format!("127.0.0.1:{port}");
+    let req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+    let resp = send_raw_request(proxy.addr(), req.as_bytes()).await;
+
+    assert!(
+        status_line(&resp).starts_with("HTTP/1.1 502 "),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn mitm_returns_502_when_upstream_connect_fails() {
+    use crate::mitm::MitmState;
+    use crate::profile::{UpstreamProfiles, UpstreamVerification};
+
+    let proxy_ca = TestCa::new("e2e-proxy-ca").await;
+    let profiles = profiles_for_tests();
+    let upstream_profiles = UpstreamProfiles::new("chrome-143-macos-arm64".to_string(), profiles)
+        .expect("profiles should be valid");
+    let upstream_verification = UpstreamVerification::default();
+
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Mitm(MitmState {
+            ca: proxy_ca.manager.clone(),
+            upstream_profiles,
+            upstream_verification,
+        }),
+    })
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind temp port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+
+    let authority = format!("127.0.0.1:{port}");
+    let req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+    let resp = send_raw_request(proxy.addr(), req.as_bytes()).await;
+
+    assert!(
+        status_line(&resp).starts_with("HTTP/1.1 502 "),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn mitm_allows_upstream_without_alpn_when_client_is_http1() {
+    use crate::mitm::MitmState;
+    use crate::profile::{UpstreamProfiles, UpstreamVerification};
+
+    let origin_ca = TestCa::new("e2e-origin-ca").await;
+    let origin = TestTlsOrigin::spawn_http(
+        "localhost",
+        &origin_ca,
+        vec!["h2".to_string()],
+        "no-alpn-ok",
+    )
+    .await;
+
+    let proxy_ca = TestCa::new("e2e-proxy-ca").await;
+
+    let profiles = profiles_for_tests();
+    let upstream_profiles = UpstreamProfiles::new("chrome-143-macos-arm64".to_string(), profiles)
+        .expect("profiles should be valid");
+    let upstream_verification = UpstreamVerification {
+        insecure_skip_verify: false,
+        verify_hostname: true,
+        ca_file: Some(origin_ca.ca_cert_path_str()),
+    };
+    upstream_profiles
+        .connector_for(None, &upstream_verification)
+        .await
+        .expect("default connector should build");
+
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Mitm(MitmState {
+            ca: proxy_ca.manager.clone(),
+            upstream_profiles,
+            upstream_verification,
+        }),
+    })
+    .await;
+
+    let authority = format!("localhost:{}", origin.addr().port());
+    let tunnel = open_connect_tunnel(proxy.addr(), &authority, &[]).await;
+
+    let connector = build_tls_client_connector(&proxy_ca.ca_cert_path_str(), &["http/1.1"]);
+    let mut cfg = connector.configure().expect("config");
+    cfg.set_verify_hostname(true);
+    let mut tls = tokio_boring::connect(cfg, "localhost", tunnel)
+        .await
+        .expect("client TLS handshake should succeed");
+
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("request should be written");
+
+    let mut resp = Vec::new();
+    tls.read_to_end(&mut resp)
+        .await
+        .expect("response should be read");
+
+    let resp = String::from_utf8_lossy(&resp);
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK\r\n"),
+        "unexpected response: {resp:?}"
+    );
+    assert!(resp.ends_with("no-alpn-ok"), "unexpected body: {resp:?}");
+}
+
+#[tokio::test]
+async fn mitm_rejects_clienthello_sni_mismatch() {
+    use crate::mitm::MitmState;
+    use crate::profile::{UpstreamProfiles, UpstreamVerification};
+
+    let origin_ca = TestCa::new("e2e-origin-ca").await;
+    let origin = TestTlsOrigin::spawn_http(
+        "localhost",
+        &origin_ca,
+        vec!["http/1.1".to_string()],
+        "sni-mismatch",
+    )
+    .await;
+
+    let proxy_ca = TestCa::new("e2e-proxy-ca").await;
+    let profiles = profiles_for_tests();
+    let upstream_profiles = UpstreamProfiles::new("chrome-143-macos-arm64".to_string(), profiles)
+        .expect("profiles should be valid");
+    let upstream_verification = UpstreamVerification {
+        insecure_skip_verify: false,
+        verify_hostname: true,
+        ca_file: Some(origin_ca.ca_cert_path_str()),
+    };
+    upstream_profiles
+        .connector_for(None, &upstream_verification)
+        .await
+        .expect("default connector should build");
+
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Mitm(MitmState {
+            ca: proxy_ca.manager.clone(),
+            upstream_profiles,
+            upstream_verification,
+        }),
+    })
+    .await;
+
+    let authority = format!("localhost:{}", origin.addr().port());
+    let tunnel = open_connect_tunnel(proxy.addr(), &authority, &[]).await;
+
+    let connector = build_tls_client_connector(&proxy_ca.ca_cert_path_str(), &["http/1.1"]);
+    let mut cfg = connector.configure().expect("config");
+    cfg.set_verify_hostname(false);
+    let mut tls = tokio_boring::connect(cfg, "definitely-not-localhost", tunnel)
+        .await
+        .expect("client TLS handshake should succeed");
+
+    let write_res = tls
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await;
+    let mut resp = Vec::new();
+    let read_res = tls.read_to_end(&mut resp).await;
+
+    assert!(
+        write_res.is_err() || read_res.is_err() || !resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
+        "expected SNI mismatch to abort the tunnel, got response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn mitm_rejects_alpn_mismatch_between_client_and_upstream() {
+    use crate::http_connect::UPSTREAM_PROFILE_HEADER;
+    use crate::mitm::MitmState;
+    use crate::profile::{UpstreamProfile, UpstreamProfiles, UpstreamVerification};
+
+    let origin_ca = TestCa::new("e2e-origin-ca").await;
+    let origin = TestTlsOrigin::spawn_http(
+        "localhost",
+        &origin_ca,
+        vec!["http/1.1".to_string()],
+        "alpn-mismatch",
+    )
+    .await;
+
+    let proxy_ca = TestCa::new("e2e-proxy-ca").await;
+
+    let mut profiles = profiles_for_tests();
+    let mut h2_profile = UpstreamProfile::chrome_143_macos_arm64();
+    h2_profile.alpn_protos = vec!["h2".to_string()];
+    profiles.insert("h2-only".to_string(), h2_profile);
+
+    let upstream_profiles = UpstreamProfiles::new("chrome-143-macos-arm64".to_string(), profiles)
+        .expect("profiles should be valid");
+    let upstream_verification = UpstreamVerification {
+        insecure_skip_verify: false,
+        verify_hostname: true,
+        ca_file: Some(origin_ca.ca_cert_path_str()),
+    };
+    upstream_profiles
+        .connector_for(None, &upstream_verification)
+        .await
+        .expect("default connector should build");
+
+    let proxy = TestProxy::spawn(ProxySettings {
+        mode: ProxyMode::Mitm(MitmState {
+            ca: proxy_ca.manager.clone(),
+            upstream_profiles,
+            upstream_verification,
+        }),
+    })
+    .await;
+
+    let authority = format!("localhost:{}", origin.addr().port());
+    let tunnel = open_connect_tunnel(
+        proxy.addr(),
+        &authority,
+        &[(UPSTREAM_PROFILE_HEADER, "h2-only")],
+    )
+    .await;
+
+    let connector = build_tls_client_connector(&proxy_ca.ca_cert_path_str(), &["h2"]);
+    let mut cfg = connector.configure().expect("config");
+    cfg.set_verify_hostname(true);
+    let mut tls = tokio_boring::connect(cfg, "localhost", tunnel)
+        .await
+        .expect("client TLS handshake should succeed");
+
+    let write_res = tls
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await;
+    let mut resp = Vec::new();
+    let read_res = tls.read_to_end(&mut resp).await;
+
+    assert!(
+        write_res.is_err() || read_res.is_err() || !resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
+        "expected ALPN mismatch to abort the tunnel, got response: {:?}",
+        String::from_utf8_lossy(&resp),
+    );
 }

@@ -74,3 +74,57 @@ where
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    #[tokio::test]
+    async fn reads_prefix_then_inner() {
+        let (inner, mut other) = duplex(64);
+        other.write_all(b"world").await.expect("write");
+        drop(other);
+
+        let mut stream = PrefixedStream::new(b"hello".to_vec(), inner);
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).await.expect("read");
+        assert_eq!(out, b"helloworld");
+    }
+
+    #[tokio::test]
+    async fn reads_prefix_in_chunks() {
+        let (inner, mut other) = duplex(64);
+        other.write_all(b"world").await.expect("write");
+        drop(other);
+
+        let mut stream = PrefixedStream::new(b"hello".to_vec(), inner);
+
+        let mut buf = [0u8; 2];
+        stream.read_exact(&mut buf).await.expect("read");
+        assert_eq!(&buf, b"he");
+
+        stream.read_exact(&mut buf).await.expect("read");
+        assert_eq!(&buf, b"ll");
+
+        stream.read_exact(&mut buf).await.expect("read");
+        assert_eq!(&buf, b"ow");
+
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).await.expect("read rest");
+        assert_eq!(rest, b"orld");
+    }
+
+    #[tokio::test]
+    async fn writes_are_forwarded_to_inner() {
+        let (inner, mut other) = duplex(64);
+        let mut stream = PrefixedStream::new(Vec::new(), inner);
+
+        stream.write_all(b"ping").await.expect("write");
+        stream.shutdown().await.expect("shutdown");
+
+        let mut buf = Vec::new();
+        other.read_to_end(&mut buf).await.expect("read");
+        assert_eq!(buf, b"ping");
+    }
+}

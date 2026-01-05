@@ -46,7 +46,7 @@ struct Args {
     #[arg(long)]
     listen: Option<String>,
 
-    /// Optional config file (TOML preferred; YAML supported for now).
+    /// Optional config file (TOML).
     #[arg(long)]
     config: Option<PathBuf>,
 
@@ -407,4 +407,183 @@ fn set_shutdown_hook(shutdown: CancellationToken) -> JoinHandle<()> {
 
         shutdown.cancel();
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compress::CertCompression;
+
+    #[test]
+    fn parse_tls_version_accepts_common_variants() {
+        assert_eq!(parse_tls_version("TLS1").unwrap(), SslVersion::TLS1);
+        assert_eq!(parse_tls_version("tls1.0").unwrap(), SslVersion::TLS1);
+        assert_eq!(parse_tls_version("tlsv1.2").unwrap(), SslVersion::TLS1_2);
+        assert_eq!(parse_tls_version("TLS1_3").unwrap(), SslVersion::TLS1_3);
+    }
+
+    #[test]
+    fn parse_tls_version_rejects_unknown_values() {
+        let err = parse_tls_version("ssl3").expect_err("invalid TLS version should error");
+        match err.kind() {
+            error::ErrorKind::Config(msg) => assert!(msg.contains("invalid TLS version")),
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_upstream_profile_config_overrides_selected_fields() {
+        let base = UpstreamProfile::chrome_143_macos_arm64();
+        let cfg = config::UpstreamProfileConfig {
+            alpn_protos: Some(vec!["h2".to_string(), "http/1.1".to_string()]),
+            grease: Some(false),
+            enable_ech_grease: None,
+            permute_extensions: Some(false),
+            curves_list: None,
+            cipher_list: None,
+            sigalgs_list: None,
+            enable_ocsp_stapling: None,
+            enable_signed_cert_timestamps: None,
+            cert_compression: Some(vec!["zlib".to_string(), "zstd".to_string()]),
+            min_tls: Some("TLS1.3".to_string()),
+            max_tls: Some("tls1.3".to_string()),
+        };
+
+        let out = apply_upstream_profile_config(&base, &cfg).expect("profile config should apply");
+
+        assert_eq!(out.alpn_protos, vec!["h2", "http/1.1"]);
+        assert!(!out.grease);
+        assert!(!out.permute_extensions);
+        assert_eq!(
+            out.cert_compression,
+            vec![CertCompression::Zlib, CertCompression::Zstd]
+        );
+        assert_eq!(out.min_tls, Some(SslVersion::TLS1_3));
+        assert_eq!(out.max_tls, Some(SslVersion::TLS1_3));
+        assert_eq!(
+            out.enable_ocsp_stapling, base.enable_ocsp_stapling,
+            "unset fields should inherit from base profile"
+        );
+    }
+
+    #[test]
+    fn init_default_profiles_contains_expected_aliases() {
+        let profiles = init_default_profiles();
+
+        for name in [
+            DEFAULT_UPSTREAM_PROFILE,
+            "chrome",
+            "chrome-143-macos-x86_64",
+            "chrome-143-macos-arm64",
+            "firefox",
+            "firefox-145-macos-arm64",
+            "safari",
+            "safari-26.2-macos-arm64",
+        ] {
+            assert!(
+                profiles.contains_key(name),
+                "missing profile alias {name:?}"
+            );
+        }
+
+        let default_profile = profiles
+            .get(DEFAULT_UPSTREAM_PROFILE)
+            .expect("default profile");
+        let chrome_profile = profiles.get("chrome").expect("chrome profile");
+        assert_eq!(
+            default_profile.grease, chrome_profile.grease,
+            "chrome alias should match the default chrome-like profile"
+        );
+
+        let firefox_profile = profiles.get("firefox").expect("firefox profile");
+        assert!(
+            firefox_profile
+                .cert_compression
+                .contains(&CertCompression::Zstd),
+            "firefox profile should advertise zstd cert compression"
+        );
+
+        let safari_profile = profiles.get("safari").expect("safari profile");
+        assert_eq!(
+            safari_profile.cert_compression,
+            vec![CertCompression::Zlib],
+            "safari profile should advertise only zlib cert compression"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_config_parses_toml() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[proxy]
+mode = "explicit"
+
+[proxy.listen]
+address = "127.0.0.1:8080"
+"#,
+        )
+        .expect("write config");
+
+        let args = Args {
+            listen: None,
+            config: Some(path),
+            mode: None,
+            ca_key_path: PathBuf::from("ca.key"),
+            ca_cert_path: PathBuf::from("ca.crt"),
+            leaf_ttl_secs: 3600,
+            upstream_ca_file: None,
+            upstream_insecure_skip_verify: false,
+            upstream_no_verify_hostname: false,
+        };
+
+        let cfg = read_config(&args)
+            .await
+            .expect("config should parse")
+            .expect("config should be loaded");
+
+        assert_eq!(cfg.proxy.listen.address, "127.0.0.1:8080");
+        assert_eq!(cfg.proxy.mode.as_deref(), Some("explicit"));
+    }
+
+    #[tokio::test]
+    async fn read_config_rejects_non_toml_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "proxy: {}").expect("write config");
+
+        let args = Args {
+            listen: None,
+            config: Some(path),
+            mode: None,
+            ca_key_path: PathBuf::from("ca.key"),
+            ca_cert_path: PathBuf::from("ca.crt"),
+            leaf_ttl_secs: 3600,
+            upstream_ca_file: None,
+            upstream_insecure_skip_verify: false,
+            upstream_no_verify_hostname: false,
+        };
+
+        let err = read_config(&args)
+            .await
+            .expect_err("non-toml config should fail");
+        match err.kind() {
+            error::ErrorKind::Config(msg) => assert!(msg.contains("unsupported config format")),
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_hook_exits_when_cancelled() {
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let task = set_shutdown_hook(shutdown);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown hook should complete")
+            .expect("shutdown hook task should not panic");
+    }
 }
