@@ -15,7 +15,8 @@ https://github.com/user-attachments/assets/bfcc8176-e02d-4f63-a709-6a2ce5af236a
 
 ## Architecture
 
-PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile"). It supports tunneling **HTTP/2** (via ALPN negotiation) by enforcing protocol consistency between the client and upstream connections.
+PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile"). 
+It supports tunneling **HTTP/2** (via ALPN negotiation) by enforcing protocol consistency between the client and upstream connections – after TLS we relay bytes; HTTP/1.1 vs HTTP/2 is purely **ALPN + byte relay**.
 
 ```ascii
 MITM mode (terminates client TLS):
