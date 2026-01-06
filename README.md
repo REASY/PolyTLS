@@ -21,17 +21,18 @@ PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just
 MITM mode (terminates client TLS):
 
 ┌─────────┐  HTTP/1.1 CONNECT + Client TLS 
-│         │    (terminated, ALPN H1/H2)    ┌─────────────┐   Upstream TLS (originated, ALPN matched) ┌──────────────┐
-│ Client  │ ──────────────────────────────►│ MITM Proxy  │ ─────────────────────────────────────────►│ Target Server│
-│         │ ◄──────────────────────────────│             │ ◄─────────────────────────────────────────│              │
-└─────────┘       Decrypted / Relayed      └─────────────┘     Decrypted / Relayed                   └──────────────┘
+│         │    (terminated, ALPN H1/H2)    ┌─────────────┐         Upstream TLS 
+│         │                                │             │     (originated, ALPN matched)  ┌──────────────┐
+│ Client  │ ──────────────────────────────►│ MITM Proxy  │ ───────────────────────────────►│ Target Server│
+│         │ ◄──────────────────────────────│             │ ◄───────────────────────────────│              │
+└─────────┘       Decrypted / Relayed      └─────────────┘     Decrypted / Relayed         └──────────────┘
                            │
-                           └────────────────────────────────────────┐
-                                                                    │
-                                      ┌─────────────────────────────┴─────────────────────────────┐
-                                      │                 Certificate Authority (CA)                │
-                                      │              (On-the-fly leaf cert generation)            │
-                                      └───────────────────────────────────────────────────────────┘
+                           └────────────────────────┐
+                                                    │
+                      ┌─────────────────────────────┴─────────────────────────────┐
+                      │                 Certificate Authority (CA)                │
+                      │              (On-the-fly leaf cert generation)            │
+                      └───────────────────────────────────────────────────────────┘
 
 Passthrough mode (tunnels TLS end-to-end):
 
