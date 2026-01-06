@@ -50,6 +50,15 @@ pub async fn run(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
+    run_with_listener(listener, settings, shutdown).await
+}
+
+async fn run_with_listener(
+    listener: TcpListener,
+    settings: ProxySettings,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let listen_addr = listener.local_addr()?;
     tracing::info!(%listen_addr, "proxy listening");
 
     loop {

@@ -8,10 +8,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub struct TestProxy {
     addr: SocketAddr,
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    shutdown: CancellationToken,
     task: JoinHandle<()>,
 }
 
@@ -22,32 +23,15 @@ impl TestProxy {
             .expect("proxy listener should bind");
         let addr = listener.local_addr().expect("proxy addr should resolve");
 
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let shutdown = CancellationToken::new();
+        let shutdown_task = shutdown.clone();
         let task = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    accept = listener.accept() => {
-                        let (stream, peer_addr) = match accept {
-                            Ok(v) => v,
-                            Err(err) => {
-                                tracing::warn!(error=%err, "proxy accept failed");
-                                break;
-                            }
-                        };
-
-                        let settings = settings.clone();
-                        tokio::spawn(async move {
-                            let _ = handle_client(stream, peer_addr, settings).await;
-                        });
-                    }
-                }
-            }
+            let _ = run_with_listener(listener, settings, shutdown_task).await;
         });
 
         Self {
             addr,
-            shutdown_tx: Some(shutdown_tx),
+            shutdown,
             task,
         }
     }
@@ -59,9 +43,7 @@ impl TestProxy {
 
 impl Drop for TestProxy {
     fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+        self.shutdown.cancel();
         self.task.abort();
     }
 }
