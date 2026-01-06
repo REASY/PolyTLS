@@ -117,15 +117,14 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|e| error::ErrorKind::Config(format!("invalid listen address: {e}")))?;
 
-    if let Some(cfg) = &file_config {
-        if let Some(mode) = cfg.proxy.mode.as_deref() {
-            if mode.trim().to_ascii_lowercase() != "explicit" {
-                return Err(error::ErrorKind::Config(format!(
-                    "unsupported proxy.mode={mode} (only \"explicit\" is supported)"
-                ))
-                .into());
-            }
-        }
+    if let Some(cfg) = &file_config
+        && let Some(mode) = cfg.proxy.mode.as_deref()
+        && !mode.trim().eq_ignore_ascii_case("explicit")
+    {
+        return Err(error::ErrorKind::Config(format!(
+            "unsupported proxy.mode={mode} (only \"explicit\" is supported)"
+        ))
+        .into());
     }
 
     let settings = init_proxy_settings(args, file_config).await?;

@@ -200,7 +200,7 @@ unsafe extern "C" fn raw_ssl_cert_decompress_zstd(
         1
     }));
 
-    result.unwrap_or_else(|_| 0)
+    result.unwrap_or(0)
 }
 
 #[cfg(test)]

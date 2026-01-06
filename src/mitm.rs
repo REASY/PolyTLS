@@ -64,7 +64,7 @@ fn find_alpn_proto<'a>(client_protos: &'a [u8], wanted: &[u8]) -> Option<&'a [u8
 }
 
 pub fn sni_mismatch(connect_host: &str, sni: Option<&str>) -> Option<PolyTlsError> {
-    let Some(sni) = sni else { return None };
+    let sni = sni?;
     if sni.eq_ignore_ascii_case(connect_host) {
         return None;
     }

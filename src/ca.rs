@@ -64,7 +64,7 @@ impl CaManager {
                 Ok::<_, boring::error::ErrorStack>((key, cert_pem, key_pem))
             })
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
+            .map_err(std::io::Error::other)??;
 
             tokio::fs::write(&ca_key_path, &key_pem).await?;
             tokio::fs::write(&ca_cert_path, &cert_pem).await?;
@@ -91,10 +91,10 @@ impl CaManager {
     pub async fn leaf_for_host(&self, host: &str) -> Result<(X509, PKey<Private>)> {
         {
             let mut cache = self.leaf_cache.lock().await;
-            if let Some(entry) = cache.get(host) {
-                if entry.created_at.elapsed() < self.leaf_ttl {
-                    return Ok((entry.cert.clone(), entry.key.clone()));
-                }
+            if let Some(entry) = cache.get(host)
+                && entry.created_at.elapsed() < self.leaf_ttl
+            {
+                return Ok((entry.cert.clone(), entry.key.clone()));
             }
 
             // Clear stale entry before generating a new one.
@@ -109,7 +109,7 @@ impl CaManager {
             generate_leaf_cert(&host_for_cert, &ca_cert, &ca_key)
         })
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
+        .map_err(std::io::Error::other)??;
 
         let mut cache = self.leaf_cache.lock().await;
         cache.insert(
