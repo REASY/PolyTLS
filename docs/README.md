@@ -13,3 +13,6 @@
 ## Testing
 - Sanitizers (ASan/LSan/TSan): [testing/sanitizers.md](testing/sanitizers.md)
 - Proxy E2E tests: [testing/e2e.md](testing/e2e.md)
+
+## Fingerprints
+- Captured TLS fingerprint JSONs: [fingerprints/README.md](fingerprints/README.md)

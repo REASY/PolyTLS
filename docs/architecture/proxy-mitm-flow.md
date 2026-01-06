@@ -69,6 +69,9 @@ The proxy can select the upstream TLS ClientHello profile per CONNECT request us
 
 Profiles are configured in TOML under the `[profiles]` table ([`src/config.rs:7`](../../src/config.rs#L7)). If the header is not present, the proxy uses `proxy.upstream.default_profile` ([`src/config.rs:44`](../../src/config.rs#L44)).
 
+## Why Chrome/Chromium profile is the highest fidelity
+PolyTLS originates upstream TLS using BoringSSL (via the Rust `boring` crate) ([`src/profile.rs`](../../src/profile.rs)). Chromium-based browsers also use BoringSSL, so the `chrome-*` upstream profile is largely configuring the *same* TLS stack that real Chrome uses. In practice this makes Chrome/Chromium the easiest profile to get close to for JA3/JA4, while Firefox (NSS) and Safari (Apple TLS) can only be approximated within BoringSSL’s feature set.
+
 ## BoringSSL named groups limitation (FFDHE)
 Some browser fingerprints (e.g., Firefox) advertise finite-field Diffie-Hellman named groups like `ffdhe2048` / `ffdhe3072` in `supported_groups`.
 
@@ -77,6 +80,14 @@ In PolyTLS, these values are applied via BoringSSL's `set_curves_list` (supporte
 - `ssl_name_to_group_id` lookup: https://github.com/google/boringssl/blob/a6f3c4c14e6515c8c7f213032be8dee3f18a9b19/ssl/ssl_key_share.cc#L496-L511
 
 As a result, attempting to configure `ffdhe2048`/`ffdhe3072` via `curves_list` fails, and reproducing Firefox's full `supported_groups` list would require patching/forking BoringSSL rather than just configuration.
+
+## Safari profile limitations (Apple TLS vs BoringSSL)
+Safari's TLS implementation is provided by Apple (Secure Transport / Network.framework), not BoringSSL. Even with a "Safari-like" `UpstreamProfile`, the proxy is still bounded by what BoringSSL can express.
+
+One practical example is legacy TLS 1.2 cipher suites: real Safari advertises ECDHE+3DES suites like `TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA` (`0xC008`) and `TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA` (`0xC012`) ([`real_safari.json`](../fingerprints/real/real_safari.json)). 
+PolyTLS's Safari cipher string includes these names ([`src/profile.rs:37`](../../src/profile.rs#L37)), but the upstream ClientHello produced by BoringSSL does not include them (see [`curl_as_safari.json`](../fingerprints/via-polytls/curl_as_safari.json)), because those suites are not enabled/implemented in BoringSSL's supported cipher table (the BoringSSL codebase defines the IDs in `tls1.h`, but does not include them in `ssl_cipher.cc`).
+
+Another example is `signature_algorithms`: the captured Safari sample includes a duplicate `rsa_pss_rsae_sha384` entry ([`real_safari.json`](../fingerprints/real/real_safari.json)). PolyTLS configures signature algorithms via BoringSSL’s `set_sigalgs_list` ([`src/profile.rs:269`](../../src/profile.rs#L269)), and BoringSSL rejects duplicate entries in that list, so PolyTLS cannot reproduce this Safari quirk exactly.
 
 ## BoringSSL ALPS codepoint caveat (`application_settings`)
 JA4 considers extension IDs, so the ALPS `application_settings` codepoint matters for fingerprint parity.
