@@ -1,3 +1,19 @@
+//! Stress/soak test for the MITM proxy data plane.
+//!
+//! This test spins up a local TLS origin + the proxy in MITM mode, then runs a fixed number of
+//! concurrent clients which repeatedly:
+//! - open an HTTP/1.1 `CONNECT` tunnel,
+//! - perform a TLS handshake with the proxy (terminating client-side TLS),
+//! - send an HTTP/1.1 `GET /` request and validate the response body,
+//! - while randomizing offered ALPN and some request headers.
+//!
+//! It is intentionally ignored by default because it is time-based and can be flaky on
+//! contended CI runners.
+//!
+//! Run manually:
+//! - `cargo test stress_mitm_proxy -- --ignored --nocapture`
+//! - `STRESS_TEST_LONG=1 STRESS_TEST_CONCURRENCY=200 cargo test stress_mitm_proxy -- --ignored --nocapture`
+
 use super::tests::TestContext;
 use rand::Rng;
 use rand::SeedableRng;
@@ -6,6 +22,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "stress/soak test (time-based + randomized); run manually with `cargo test stress_mitm_proxy -- --ignored --nocapture`"]
 async fn stress_mitm_proxy() {
     // Run for a shorter duration by default to keep CI fast, but allow manual override
     let duration = if std::env::var("STRESS_TEST_LONG").is_ok() {
