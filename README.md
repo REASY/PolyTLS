@@ -22,7 +22,7 @@ MITM mode (terminates client TLS):
 
 ┌─────────┐  HTTP/1.1 CONNECT + Client TLS (terminated)  ┌─────────────┐   Upstream TLS (originated)    ┌──────────────┐
 │ Client  │ ────────────────────────────────────────────►│ MITM Proxy  │ ─────────────────────────────► │ Target Server│
-│         │ ◄────────────────────────────────────────────│             │ ◄────────────────────────────  │              │
+│         │ ◄────────────────────────────────────────────│             │ ◄───────────────────────────── │              │
 └─────────┘            Decrypted / Relayed               └─────────────┘     Decrypted / Relayed        └──────────────┘
                                  │
                                  └──────────────────────────────────┐
@@ -34,10 +34,10 @@ MITM mode (terminates client TLS):
 
 Passthrough mode (tunnels TLS end-to-end):
 
-┌─────────┐  HTTP/1.1 CONNECT + TLS (tunneled)  ┌─────────────┐   TCP relay          ┌──────────────┐
-│ Client  │ ───────────────────────────────────►│ Proxy       │ ───────────────────► │ Target Server│
-│         │ ◄───────────────────────────────────│             │ ◄─────────────────── │              │
-└─────────┘          Encrypted / Relayed        └─────────────┘  Encrypted / Relayed └──────────────┘
+┌─────────┐  HTTP/1.1 CONNECT + TLS (tunneled)  ┌─────────────┐   TCP relay            ┌──────────────┐
+│ Client  │ ───────────────────────────────────►│ Proxy       │ ─────────────────────► │ Target Server│
+│         │ ◄───────────────────────────────────│             │ ◄───────────────────── │              │
+└─────────┘          Encrypted / Relayed        └─────────────┘  Encrypted / Relayed   └──────────────┘
 ```
 
 See the full step-by-step flow (including the `PrefixedStream` "leftover bytes" trick and the ALPN compatibility check): [`docs/architecture/proxy-mitm-flow.md`](docs/architecture/proxy-mitm-flow.md)
