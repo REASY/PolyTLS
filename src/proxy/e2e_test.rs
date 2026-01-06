@@ -9,14 +9,14 @@ use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-struct TestProxy {
+pub struct TestProxy {
     addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
 }
 
 impl TestProxy {
-    async fn spawn(settings: ProxySettings) -> Self {
+    pub async fn spawn(settings: ProxySettings) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("proxy listener should bind");
@@ -52,7 +52,7 @@ impl TestProxy {
         }
     }
 
-    fn addr(&self) -> SocketAddr {
+    pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 }
@@ -74,15 +74,15 @@ fn unique_temp_dir(prefix: &str) -> tempfile::TempDir {
         .expect("temp dir should be created")
 }
 
-struct TestCa {
+pub struct TestCa {
     #[allow(dead_code)]
-    dir: tempfile::TempDir,
-    manager: Arc<crate::ca::CaManager>,
-    ca_cert_path: PathBuf,
+    pub dir: tempfile::TempDir,
+    pub manager: Arc<crate::ca::CaManager>,
+    pub ca_cert_path: PathBuf,
 }
 
 impl TestCa {
-    async fn new(prefix: &str) -> Self {
+    pub async fn new(prefix: &str) -> Self {
         use crate::ca::{CaConfig, CaManager};
 
         let dir = unique_temp_dir(prefix);
@@ -104,19 +104,19 @@ impl TestCa {
         }
     }
 
-    fn ca_cert_path_str(&self) -> String {
+    pub fn ca_cert_path_str(&self) -> String {
         self.ca_cert_path.to_string_lossy().to_string()
     }
 }
 
-struct TestTlsOrigin {
+pub struct TestTlsOrigin {
     addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
 }
 
 impl TestTlsOrigin {
-    async fn spawn_http(host: &str, ca: &TestCa, alpn_protos: Vec<String>, body: &str) -> Self {
+    pub async fn spawn_http(host: &str, ca: &TestCa, alpn_protos: Vec<String>, body: &str) -> Self {
         let (leaf_cert, leaf_key) = ca
             .manager
             .leaf_for_host(host)
@@ -276,7 +276,7 @@ impl TestTlsOrigin {
         )
     }
 
-    fn addr(&self) -> SocketAddr {
+    pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 }
@@ -290,24 +290,28 @@ impl Drop for TestTlsOrigin {
     }
 }
 
-struct TestClient {
+pub struct TestClient {
     proxy_addr: SocketAddr,
     ca_cert_path: Option<String>,
 }
 
 impl TestClient {
-    fn new(proxy_addr: SocketAddr, ca_cert_path: Option<String>) -> Self {
+    pub fn new(proxy_addr: SocketAddr, ca_cert_path: Option<String>) -> Self {
         Self {
             proxy_addr,
             ca_cert_path,
         }
     }
 
-    async fn connect_tunnel(&self, authority: &str, extra_headers: &[(&str, &str)]) -> TcpStream {
+    pub async fn connect_tunnel(
+        &self,
+        authority: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> TcpStream {
         open_connect_tunnel(self.proxy_addr, authority, extra_headers).await
     }
 
-    async fn connect_tls(
+    pub async fn connect_tls(
         &self,
         host: &str,
         tunnel: TcpStream,
@@ -327,7 +331,7 @@ impl TestClient {
             .expect("TLS handshake should succeed")
     }
 
-    async fn get(
+    pub async fn get(
         &self,
         host: &str,
         port: u16,
@@ -356,17 +360,17 @@ impl TestClient {
     }
 }
 
-struct TestContext {
+pub struct TestContext {
     #[allow(dead_code)]
-    origin_ca: TestCa,
+    pub origin_ca: TestCa,
     #[allow(dead_code)]
-    proxy_ca: TestCa,
-    origin: TestTlsOrigin,
-    proxy: TestProxy,
+    pub proxy_ca: TestCa,
+    pub origin: TestTlsOrigin,
+    pub proxy: TestProxy,
 }
 
 impl TestContext {
-    async fn new_mitm(origin_body: &str) -> Self {
+    pub async fn new_mitm(origin_body: &str) -> Self {
         let origin_ca = TestCa::new("e2e-origin-ca").await;
         let origin = TestTlsOrigin::spawn_http(
             "localhost",
@@ -379,7 +383,7 @@ impl TestContext {
         Self::from_origin(origin, origin_ca).await
     }
 
-    async fn from_origin(origin: TestTlsOrigin, origin_ca: TestCa) -> Self {
+    pub async fn from_origin(origin: TestTlsOrigin, origin_ca: TestCa) -> Self {
         use crate::mitm::MitmState;
         use crate::profile::{UpstreamProfiles, UpstreamVerification};
 
@@ -417,15 +421,15 @@ impl TestContext {
         }
     }
 
-    fn client(&self) -> TestClient {
+    pub fn client(&self) -> TestClient {
         TestClient::new(self.proxy.addr(), Some(self.proxy_ca.ca_cert_path_str()))
     }
 
-    fn origin_addr(&self) -> SocketAddr {
+    pub fn origin_addr(&self) -> SocketAddr {
         self.origin.addr()
     }
 
-    async fn new_passthrough(origin_body: &str) -> Self {
+    pub async fn new_passthrough(origin_body: &str) -> Self {
         let origin_ca = TestCa::new("e2e-origin-ca").await;
         let origin = TestTlsOrigin::spawn_http(
             "localhost",
@@ -451,7 +455,7 @@ impl TestContext {
     }
 
     #[allow(dead_code)]
-    fn client_passthrough(&self) -> TestClient {
+    pub fn client_passthrough(&self) -> TestClient {
         TestClient::new(self.proxy.addr(), Some(self.origin_ca.ca_cert_path_str()))
     }
 }
@@ -564,7 +568,7 @@ fn status_line(buf: &[u8]) -> String {
     String::from_utf8_lossy(&buf[..first_line_end]).to_string()
 }
 
-fn profiles_for_tests() -> HashMap<String, crate::profile::UpstreamProfile> {
+pub fn profiles_for_tests() -> HashMap<String, crate::profile::UpstreamProfile> {
     use crate::profile::UpstreamProfile;
 
     let mut profiles = HashMap::new();

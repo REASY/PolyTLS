@@ -310,3 +310,7 @@ async fn write_http_error_response(stream: &mut TcpStream, code: u16, reason: &s
 #[cfg(test)]
 #[path = "proxy/e2e_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "proxy/stress_test.rs"]
+mod stress_test;

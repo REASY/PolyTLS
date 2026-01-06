@@ -1233,6 +1233,7 @@ dependencies = [
  "opentelemetry-resource-detectors",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "rand",
  "scudo",
  "serde",
  "tempfile",
