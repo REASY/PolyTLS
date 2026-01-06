@@ -15,17 +15,18 @@ https://github.com/user-attachments/assets/bfcc8176-e02d-4f63-a709-6a2ce5af236a
 
 ## Architecture
 
-PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile").
+PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile"). It supports tunneling **HTTP/2** (via ALPN negotiation) by enforcing protocol consistency between the client and upstream connections.
 
 ```ascii
 MITM mode (terminates client TLS):
 
-┌─────────┐  HTTP/1.1 CONNECT + Client TLS (terminated)  ┌─────────────┐   Upstream TLS (originated)    ┌──────────────┐
-│ Client  │ ────────────────────────────────────────────►│ MITM Proxy  │ ─────────────────────────────► │ Target Server│
-│         │ ◄────────────────────────────────────────────│             │ ◄───────────────────────────── │              │
-└─────────┘            Decrypted / Relayed               └─────────────┘     Decrypted / Relayed        └──────────────┘
-                                 │
-                                 └──────────────────────────────────┐
+┌─────────┐  HTTP/1.1 CONNECT + Client TLS 
+│         │    (terminated, ALPN H1/H2)    ┌─────────────┐   Upstream TLS (originated, ALPN matched) ┌──────────────┐
+│ Client  │ ──────────────────────────────►│ MITM Proxy  │ ─────────────────────────────────────────►│ Target Server│
+│         │ ◄──────────────────────────────│             │ ◄─────────────────────────────────────────│              │
+└─────────┘       Decrypted / Relayed      └─────────────┘     Decrypted / Relayed                   └──────────────┘
+                           │
+                           └────────────────────────────────────────┐
                                                                     │
                                       ┌─────────────────────────────┴─────────────────────────────┐
                                       │                 Certificate Authority (CA)                │
@@ -59,7 +60,7 @@ Sometimes the thing you're debugging isn't your HTTP request – it's the **TLS 
 PolyTLS is a small, explicit `CONNECT` proxy that helps you test that reality:
 
 - **Passthrough mode**: tunnel bytes as-is (no TLS termination).
-- **MITM mode**: terminate client TLS, then open a *new* upstream TLS connection.
+- **MITM mode**: terminate client TLS, then open a *new* upstream TLS connection. Supports **HTTP/1.1** and **HTTP/2** (via ALPN).
 - **Upstream TLS profiles**: pick an upstream "browser-like" TLS profile per request (so you can A/B behavior across profiles without changing your client).
 
 Use it for **authorized testing / reproducible debugging**: "does this endpoint break only when the handshake looks like X?", "does the origin negotiate a different protocol?", "why does a vendor SDK work but curl doesn't?".

@@ -375,7 +375,7 @@ impl TestContext {
         let origin = TestTlsOrigin::spawn_http(
             "localhost",
             &origin_ca,
-            vec!["http/1.1".to_string()],
+            vec!["h2".to_string(), "http/1.1".to_string()],
             origin_body,
         )
         .await;
@@ -434,7 +434,7 @@ impl TestContext {
         let origin = TestTlsOrigin::spawn_http(
             "localhost",
             &origin_ca,
-            vec!["http/1.1".to_string()],
+            vec!["h2".to_string(), "http/1.1".to_string()],
             origin_body,
         )
         .await;
@@ -644,7 +644,7 @@ async fn mitm_selects_profile_per_request_via_connect_header() {
 
         let tls = ctx
             .client()
-            .connect_tls("localhost", tunnel, &["h2", "http/1.1"], true)
+            .connect_tls("localhost", tunnel, &["http/1.1"], true)
             .await;
 
         assert_eq!(
@@ -665,7 +665,7 @@ async fn mitm_selects_profile_per_request_via_connect_header() {
 
         let tls = ctx
             .client()
-            .connect_tls("localhost", tunnel, &["h2", "http/1.1"], true)
+            .connect_tls("localhost", tunnel, &["http/1.1"], true)
             .await;
 
         assert_eq!(

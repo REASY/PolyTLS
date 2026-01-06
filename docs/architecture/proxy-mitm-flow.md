@@ -33,9 +33,9 @@ Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
 8. Validate that the client's SNI matches the CONNECT host ([`src/proxy.rs:220`](../../src/proxy.rs#L220), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
 9. Configure and connect upstream TLS using the selected profile and verification policy ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/profile.rs:217`](../../src/profile.rs#L217)).
 10. Ensure the client and upstream negotiated compatible ALPN to avoid protocol confusion:
-    - If both sides negotiated ALPN, it must match (e.g., `h2` ↔ `h2`).
-    - If upstream did not negotiate ALPN (`<none>`), treat it as compatible with `http/1.1` (some servers omit ALPN when selecting default HTTP/1.1).
-    - Otherwise abort. ([`src/proxy.rs:237`](../../src/proxy.rs#L237)).
+    - If client selected an ALPN protocol (e.g. `h2`), forces upstream connection to use ONLY that protocol.
+    - If upstream negotiation fails or mismatches (rare due to constraint), the connection is aborted.
+    - If client had no ALPN, defaults upstream to `http/1.1`. ([`src/proxy.rs:241`](../../src/proxy.rs#L241)).
 11. Relay application bytes until shutdown using `tokio::io::copy_bidirectional` ([`src/proxy.rs:259`](../../src/proxy.rs#L259)).
 
 ## Why `copy_bidirectional` works here

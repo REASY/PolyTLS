@@ -18,8 +18,8 @@ System_Boundary(polytls, "PolyTLS (Rust + Tokio)") {
   Component(ca, "CA Manager", "src/ca.rs", "Mints per-host leaf certificates from the MITM root CA.")
   Component(client_tls, "Client TLS Terminator", "tokio-boring/boring", "Accepts client TLS using the minted leaf certificate.")
   Component(sni_check, "SNI Check", "src/mitm.rs", "Ensures CONNECT host matches ClientHello SNI.")
-  Component(up_tls, "Upstream TLS Connector", "src/proxy.rs", "Origins TLS to upstream using the selected profile (tokio-boring/boring).")
-  Component(tunnel, "Tunnel Copier", "src/proxy.rs", "Verifies negotiated ALPN and relays plaintext application bytes (tokio::io::copy_bidirectional).")
+  Component(up_tls, "Upstream TLS Connector", "src/proxy.rs", "Origins TLS to upstream using the selected profile (constrains ALPN to match client).")
+  Component(tunnel, "Tunnel Copier", "src/proxy.rs", "Verifies negotiated ALPN (HTTP/1.1 and H2) and relays plaintext application bytes (tokio::io::copy_bidirectional).")
 }
 
 Rel(client, parser, "CONNECT host:port", "TCP / HTTP/1.1")

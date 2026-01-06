@@ -1,3 +1,4 @@
+use crate::alpn::AlpnProtocol;
 use crate::error::{ErrorKind, Result};
 use crate::http_connect::{ConnectError, read_connect_request};
 use crate::mitm::{MitmState, build_client_acceptor, sni_mismatch};
@@ -230,31 +231,50 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
     connect_config.set_enable_ech_grease(upstream_profile.enable_ech_grease);
     connect_config.set_verify_hostname(mitm.upstream_verification.effective_verify_hostname());
 
+    let client_alpn_bytes = client_tls.ssl().selected_alpn_protocol();
+    let upstream_alpn_protos = select_upstream_alpn_proto(client_alpn_bytes)?;
+
+    connect_config
+        .set_alpn_protos(&upstream_alpn_protos)
+        .map_err(|e| ErrorKind::TlsHandshake(format!("failed to set ALPN: {e}")))?;
+
     let mut upstream_tls = tokio_boring::connect(connect_config, &connect.host, upstream)
         .await
         .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
 
-    let client_alpn = client_tls.ssl().selected_alpn_protocol();
-    let upstream_alpn = upstream_tls.ssl().selected_alpn_protocol();
+    let client_alpn_bytes = client_tls.ssl().selected_alpn_protocol();
+    let upstream_alpn_bytes = upstream_tls.ssl().selected_alpn_protocol();
+
+    let client_alpn: Option<AlpnProtocol> = get_alpn_protocol(client_alpn_bytes);
+    let upstream_alpn: Option<AlpnProtocol> = get_alpn_protocol(upstream_alpn_bytes);
+
     // Enforce ALPN compatibility to avoid protocol confusion (e.g., client negotiates `h2` while
     // upstream negotiates `http/1.1`). Some upstreams omit ALPN when implicitly selecting
     // HTTP/1.1, so treat `None` as compatible with `http/1.1`.
-    let alpn_compatible = match (client_alpn, upstream_alpn) {
+    let alpn_compatible = match (&client_alpn, &upstream_alpn) {
         (Some(client), Some(upstream)) => client == upstream,
-        (Some(client), None) => client == b"http/1.1".as_slice(),
-        (None, Some(upstream)) => upstream == b"http/1.1".as_slice(),
+        (Some(client), None) => *client == AlpnProtocol::Http11,
+        (None, Some(upstream)) => *upstream == AlpnProtocol::Http11,
         (None, None) => true,
     };
+    tracing::info!(
+        ?client_alpn,
+        ?upstream_alpn,
+        alpn_compatible = ?alpn_compatible,
+        "ALPN negotiated"
+    );
 
     if !alpn_compatible {
-        let client_alpn = client_alpn
-            .map(|v| String::from_utf8_lossy(v).to_string())
+        let client_alpn_str = client_alpn
+            .as_ref()
+            .map(|p| p.to_string())
             .unwrap_or_else(|| "<none>".to_string());
-        let upstream_alpn = upstream_alpn
-            .map(|v| String::from_utf8_lossy(v).to_string())
+        let upstream_alpn_str = upstream_alpn
+            .as_ref()
+            .map(|p| p.to_string())
             .unwrap_or_else(|| "<none>".to_string());
         return Err(ErrorKind::TlsHandshake(format!(
-            "ALPN mismatch: client={client_alpn} upstream={upstream_alpn}"
+            "ALPN mismatch: client={client_alpn_str} upstream={upstream_alpn_str}"
         ))
         .into());
     }
@@ -266,10 +286,32 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
         %peer_addr,
         client_to_upstream,
         upstream_to_client,
+        ?client_alpn,
+        ?upstream_alpn,
         "mitm tunnel closed"
     );
 
     Ok(())
+}
+
+fn get_alpn_protocol(client_alpn: Option<&[u8]>) -> Option<crate::alpn::AlpnProtocol> {
+    client_alpn.map(crate::alpn::AlpnProtocol::from_bytes)
+}
+
+fn select_upstream_alpn_proto(client_alpn_bytes: Option<&[u8]>) -> Result<Vec<u8>> {
+    match client_alpn_bytes {
+        Some(proto) => {
+            let len = proto.len();
+            if len > 255 {
+                return Err(ErrorKind::TlsHandshake(format!("client ALPN too long: {len}")).into());
+            }
+            let mut v = Vec::with_capacity(1 + len);
+            v.push(len as u8);
+            v.extend_from_slice(proto);
+            Ok(v)
+        }
+        None => Ok(b"\x08http/1.1".to_vec()),
+    }
 }
 
 async fn write_connect_ok(stream: &mut TcpStream) -> Result<()> {

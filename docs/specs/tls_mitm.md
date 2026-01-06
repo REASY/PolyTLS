@@ -24,8 +24,8 @@ Many upstream services behave differently depending on TLS handshake details (ci
 - **Must** use BoringSSL (not rustls or OpenSSL) for ClientHello customization capabilities
 - **Must** maintain full bidirectional traffic flow with minimal latency
 - **MVP**: explicit proxy only (HTTP/1.1 `CONNECT`), no transparent/TProxy mode
-- **Current**: byte-relay only (no HTTP/2 translation or HTTP parsing); ALPN is profile-driven (default profile is `http/1.1`, Firefox/Safari profiles may advertise `h2`) ([`src/profile.rs`](../../src/profile.rs#L60), [`src/proxy.rs`](../../src/proxy.rs#L259))
-- **Future**: HTTP/2 support is a larger effort (H2 frame model, SETTINGS fingerprinting, HPACK behavior, pseudo-header ordering, priority/prioritization)
+- **Current**: L4 byte-relay (no L7 HTTP/2 translation/framing parsing); ALPN is profile-driven (Chrome/Firefox/Safari profiles advertise `h2`, default profile is `http/1.1`).
+- **Future**: Full L7 HTTP/2 support (H2 frame model, SETTINGS fingerprinting, HPACK behavior, pseudo-header ordering, priority/prioritization).
 
 ### 1.4 OSI Scope & Fingerprinting Limits (Important)
 This system is primarily a Layer 7 proxy (HTTP `CONNECT`) that performs Layer 6 TLS bridging. It will **inevitably change** characteristics outside of TLS, including:
@@ -328,6 +328,7 @@ Implemented:
 - Upstream TLS profile selection (default + per-request header) ([`src/main.rs`](../../src/main.rs#L270), [`src/http_connect.rs`](../../src/http_connect.rs#L84))
 - Upstream ClientHello knobs via BoringSSL (GREASE/permutation/ALPN/curves/cipher list/sigalgs/OCSP/SCT/cert compression) ([`src/profile.rs`](../../src/profile.rs#L217))
 - OpenTelemetry/OTLP logging+metrics plumbing and graceful shutdown ([`src/telemetry/logger.rs`](../../src/telemetry/logger.rs#L1), [`src/main.rs`](../../src/main.rs#L132))
+- **H2 Support**: L4 tunneling of HTTP/2 traffic via coordinated ALPN negotiation ([`src/proxy.rs`](../../src/proxy.rs)).
 
 Not implemented yet (examples):
 - Control plane API, hot-reload configuration, health/readiness endpoints ([`docs/specs/tls_mitm.md`](tls_mitm.md#L251))
@@ -430,31 +431,25 @@ Operational notes:
 
 ## 9. Future Enhancements
 
-### 9.1 Short-term (Next 6 months)
+### 9.1 Short-term
 
--   HTTP/2 end-to-end proxying (frame parsing/forwarding, SETTINGS, HPACK, pseudo-header ordering, prioritization)
-
--   gRPC and Protocol Buffers inspection hooks
-
--   GUI for configuration management
+- HTTP/2 **L7** proxying (frame parsing/forwarding, SETTINGS, HPACK, pseudo-header ordering, prioritization) (L4 tunneling is already supported)
+- gRPC and Protocol Buffers inspection hooks
+- GUI for configuration management
 
 
-### 9.2 Medium-term (6-12 months)
+### 9.2 Medium-term
 
--   QUIC and HTTP/3 support
-
--   Machine learning for adaptive fingerprint selection
-
--   Distributed deployment with shared state
+- QUIC and HTTP/3 support
+- Machine learning for adaptive fingerprint selection
+- Distributed deployment with shared state
 
 
-### 9.3 Long-term (12+ months)
+### 9.3 Long-term
 
--   Integration with service mesh (Istio, Linkerd)
-
--   Hardware acceleration support
-
--   Formal verification of cryptographic components
+- Integration with service mesh (Istio, Linkerd)
+- Hardware acceleration support
+- Formal verification of cryptographic components
 
 
 ## 10. Success Criteria

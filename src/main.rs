@@ -1,3 +1,4 @@
+mod alpn;
 mod ca;
 mod compress;
 mod config;
