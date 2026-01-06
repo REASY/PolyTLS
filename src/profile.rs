@@ -1,8 +1,14 @@
 use crate::compress::{CertCompression, register_certificate_compression};
 use crate::error::{ErrorKind, Result};
-use boring::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
+use boring::ex_data::Index;
+use boring::ssl::{
+    Ssl, SslConnector, SslContext, SslMethod, SslRef, SslSession, SslSessionCacheMode,
+    SslVerifyMode, SslVersion,
+};
+use foreign_types::ForeignTypeRef;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::ptr;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::RwLock;
 
 const CHROME_CURVES_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384";
@@ -38,6 +44,7 @@ const SAFARI_TLS12_CIPHER_LIST: &str = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDS
 #[derive(Clone, Debug)]
 pub struct UpstreamProfile {
     pub alpn_protos: Vec<String>,
+    pub alps_protos: Vec<String>,
     pub grease: bool,
     pub enable_ech_grease: bool,
     pub permute_extensions: bool,
@@ -62,6 +69,7 @@ impl UpstreamProfile {
         // https://github.com/chromium/chromium/blob/5b92a5a0fc3489f88b8d512004010475d4ae484a/net/socket/ssl_client_socket_impl.cc#L658
         Self {
             alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
+            alps_protos: vec!["h2".to_string()],
             grease: true,
             enable_ech_grease: true,
             permute_extensions: true,
@@ -80,6 +88,7 @@ impl UpstreamProfile {
         // https://github.com/mozilla-firefox/firefox/blob/b82cded8c5b732c2ea15b7871d14e13b5fadeffd/security/nss/lib/ssl/sslsock.c#L4255
         Self {
             alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
+            alps_protos: Vec::new(),
             grease: false,
             enable_ech_grease: true,
             permute_extensions: false,
@@ -101,6 +110,7 @@ impl UpstreamProfile {
     pub fn safari_26_2_macos_arm64() -> Self {
         Self {
             alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
+            alps_protos: Vec::new(),
             grease: true,
             enable_ech_grease: false,
             permute_extensions: false,
@@ -272,7 +282,79 @@ pub fn build_upstream_connector(
         .set_max_proto_version(profile.max_tls)
         .map_err(|e| ErrorKind::Config(format!("failed to set max TLS version: {e}")))?;
 
+    init_session_resumption(&mut builder);
+
     Ok(builder.build())
+}
+
+pub(crate) type UpstreamSessionCache = Arc<Mutex<HashMap<String, SslSession>>>;
+
+fn upstream_session_cache_index() -> Index<SslContext, UpstreamSessionCache> {
+    static IDX: OnceLock<Index<SslContext, UpstreamSessionCache>> = OnceLock::new();
+    *IDX.get_or_init(|| {
+        SslContext::new_ex_index::<UpstreamSessionCache>()
+            .expect("SSL context ex_data index for upstream sessions")
+    })
+}
+
+fn upstream_session_key_index() -> Index<Ssl, String> {
+    static IDX: OnceLock<Index<Ssl, String>> = OnceLock::new();
+    *IDX.get_or_init(|| Ssl::new_ex_index::<String>().expect("SSL ex_data index for upstream key"))
+}
+
+pub(crate) fn upstream_session_cache(connector: &SslConnector) -> Option<UpstreamSessionCache> {
+    connector
+        .context()
+        .ex_data(upstream_session_cache_index())
+        .cloned()
+}
+
+pub(crate) fn set_upstream_session_key(ssl: &mut SslRef, key: String) {
+    ssl.set_ex_data(upstream_session_key_index(), key);
+}
+
+pub(crate) fn add_application_settings(
+    ssl: &mut SslRef,
+    proto: &str,
+    settings: &[u8],
+) -> Result<()> {
+    let settings_ptr = if settings.is_empty() {
+        ptr::null()
+    } else {
+        settings.as_ptr()
+    };
+
+    let ok = unsafe {
+        boring_sys::SSL_add_application_settings(
+            ssl.as_ptr(),
+            proto.as_ptr(),
+            proto.len(),
+            settings_ptr,
+            settings.len(),
+        )
+    };
+
+    if ok != 1 {
+        return Err(
+            ErrorKind::TlsHandshake("failed to set ALPS application settings".to_string()).into(),
+        );
+    }
+    Ok(())
+}
+
+fn init_session_resumption(builder: &mut boring::ssl::SslConnectorBuilder) {
+    let cache: UpstreamSessionCache = Arc::new(Mutex::new(HashMap::new()));
+
+    builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    builder.set_ex_data(upstream_session_cache_index(), cache.clone());
+
+    builder.set_new_session_callback(move |ssl, session| {
+        let Some(key) = ssl.ex_data(upstream_session_key_index()).cloned() else {
+            return;
+        };
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        guard.insert(key, session);
+    });
 }
 
 pub(crate) fn validate_alpn_protos(protos: &[String]) -> Result<()> {

@@ -82,14 +82,36 @@ pub enum AlpnProtocol {
     H3Draft31,
     /// "h3-32": HTTP/3 Draft 32
     H3Draft32,
-    /// Any other protocol ID not explicitly matched.
-    Other(Vec<u8>),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownAlpnProtocol {
+    bytes: Vec<u8>,
+}
+
+impl UnknownAlpnProtocol {
+    #[allow(dead_code)]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl fmt::Display for UnknownAlpnProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unknown ALPN protocol: {}",
+            String::from_utf8_lossy(&self.bytes)
+        )
+    }
+}
+
+impl std::error::Error for UnknownAlpnProtocol {}
 
 impl AlpnProtocol {
     /// Parses a byte slice into an `AlpnProtocol`.
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        match bytes {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, UnknownAlpnProtocol> {
+        let protocol = match bytes {
             b"http/0.9" => Self::Http09,
             b"http/1.0" => Self::Http10,
             b"http/1.1" => Self::Http11,
@@ -130,12 +152,13 @@ impl AlpnProtocol {
             b"h3-30" => Self::H3Draft30,
             b"h3-31" => Self::H3Draft31,
             b"h3-32" => Self::H3Draft32,
-            _ => Self::Other(bytes.to_vec()),
-        }
+            _ => return Err(UnknownAlpnProtocol { bytes: bytes.to_vec() }),
+        };
+        Ok(protocol)
     }
 
     /// Returns the canonical byte representation of the protocol ID.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Http09 => b"http/0.9",
             Self::Http10 => b"http/1.0",
@@ -176,7 +199,6 @@ impl AlpnProtocol {
             Self::H3Draft30 => b"h3-30",
             Self::H3Draft31 => b"h3-31",
             Self::H3Draft32 => b"h3-32",
-            Self::Other(v) => v,
         }
     }
 }
@@ -205,39 +227,33 @@ mod tests {
         ];
 
         for (proto, bytes) in cases {
-            assert_eq!(AlpnProtocol::from_bytes(bytes), proto);
+            assert_eq!(AlpnProtocol::from_bytes(bytes).expect("should parse known ALPN"), proto);
             assert_eq!(proto.as_bytes(), bytes);
             assert_eq!(format!("{}", proto), String::from_utf8_lossy(bytes));
         }
     }
 
     #[test]
-    fn test_other_variant() {
+    fn test_unknown_protocol() {
         let bytes = b"custom-protocol";
-        let proto = AlpnProtocol::from_bytes(bytes);
-        assert_eq!(proto, AlpnProtocol::Other(bytes.to_vec()));
-        assert_eq!(proto.as_bytes(), bytes);
-        assert_eq!(format!("{}", proto), "custom-protocol");
+        let err = AlpnProtocol::from_bytes(bytes).expect_err("should reject unknown ALPN");
+        assert_eq!(err.bytes(), bytes);
     }
 
     #[test]
     fn test_empty_bytes() {
         let bytes = b"";
-        let proto = AlpnProtocol::from_bytes(bytes);
-        assert_eq!(proto, AlpnProtocol::Other(vec![]));
-        assert_eq!(proto.as_bytes(), bytes);
-        assert_eq!(format!("{}", proto), "");
+        let err = AlpnProtocol::from_bytes(bytes).expect_err("empty ALPN must be rejected");
+        assert_eq!(err.bytes(), bytes);
     }
 
     #[test]
     fn test_non_utf8_display() {
         // Some hypothetical binary protocol identifier
         let bytes = b"\xff\xfe\x00\x01";
-        let proto = AlpnProtocol::from_bytes(bytes);
-        assert!(matches!(proto, AlpnProtocol::Other(_)));
-        assert_eq!(proto.as_bytes(), bytes);
-        // Display should be lossy
-        let display = format!("{}", proto);
+        let err = AlpnProtocol::from_bytes(bytes).expect_err("should reject non-UTF8 ALPN");
+        assert_eq!(err.bytes(), bytes);
+        let display = format!("{err}");
         assert!(display.contains('\u{FFFD}')); // Replacement character
     }
 }

@@ -1,8 +1,10 @@
 use crate::alpn::AlpnProtocol;
-use crate::error::{ErrorKind, Result};
+use crate::error::ErrorKind::TlsHandshake;
+use crate::error::{ErrorKind, PolyTlsError, Result};
 use crate::http_connect::{ConnectError, read_connect_request};
 use crate::mitm::{MitmState, build_client_acceptor, sni_mismatch};
 use crate::prefixed_stream::PrefixedStream;
+use crate::profile::{add_application_settings, set_upstream_session_key, upstream_session_cache};
 use boring::ssl::NameType;
 use std::net::SocketAddr;
 use tokio::io::{AsyncWriteExt, copy_bidirectional};
@@ -237,25 +239,50 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
     let mut connect_config = upstream_connector
         .configure()
         .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
+
+    let session_key = format!("{}:{}", connect.host, connect.port);
+    set_upstream_session_key(&mut connect_config, session_key.clone());
+    let session_cache = upstream_session_cache(upstream_connector.as_ref())
+        .ok_or_else(|| ErrorKind::Config("upstream connector session cache missing".to_string()))?;
+    let session_to_resume = {
+        let guard = session_cache.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(&session_key).cloned()
+    };
+    if let Some(session) = &session_to_resume {
+        unsafe {
+            connect_config
+                .set_session(session)
+                .map_err(|e| ErrorKind::TlsHandshake(format!("failed to set session: {e}")))?;
+        }
+    }
+
     connect_config.set_enable_ech_grease(upstream_profile.enable_ech_grease);
     connect_config.set_verify_hostname(mitm.upstream_verification.effective_verify_hostname());
 
     let client_alpn_bytes = client_tls.ssl().selected_alpn_protocol();
-    let upstream_alpn_protos = select_upstream_alpn_proto(client_alpn_bytes)?;
+    let client_alpn: Option<AlpnProtocol> = get_alpn_protocol(client_alpn_bytes)?;
+    let upstream_alpn_protos = select_upstream_alpn_proto(client_alpn.as_ref())?;
 
     connect_config
         .set_alpn_protos(&upstream_alpn_protos)
         .map_err(|e| ErrorKind::TlsHandshake(format!("failed to set ALPN: {e}")))?;
 
+    if matches!(client_alpn, Some(AlpnProtocol::H2))
+        && upstream_profile
+            .alps_protos
+            .iter()
+            .any(|proto| proto == "h2")
+    {
+        add_application_settings(&mut connect_config, "h2", &[])?;
+    }
+
     let mut upstream_tls = tokio_boring::connect(connect_config, &connect.host, upstream)
         .await
         .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
 
-    let client_alpn_bytes = client_tls.ssl().selected_alpn_protocol();
     let upstream_alpn_bytes = upstream_tls.ssl().selected_alpn_protocol();
 
-    let client_alpn: Option<AlpnProtocol> = get_alpn_protocol(client_alpn_bytes);
-    let upstream_alpn: Option<AlpnProtocol> = get_alpn_protocol(upstream_alpn_bytes);
+    let upstream_alpn: Option<AlpnProtocol> = get_alpn_protocol(upstream_alpn_bytes)?;
 
     // Enforce ALPN compatibility to avoid protocol confusion (e.g., client negotiates `h2` while
     // upstream negotiates `http/1.1`). Some upstreams omit ALPN when implicitly selecting
@@ -303,22 +330,39 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
     Ok(())
 }
 
-fn get_alpn_protocol(client_alpn: Option<&[u8]>) -> Option<crate::alpn::AlpnProtocol> {
-    client_alpn.map(crate::alpn::AlpnProtocol::from_bytes)
+fn get_alpn_protocol(client_alpn: Option<&[u8]>) -> Result<Option<crate::alpn::AlpnProtocol>> {
+    match client_alpn {
+        Some(bytes) => crate::alpn::AlpnProtocol::from_bytes(bytes)
+            .map(Some)
+            .map_err(|err| PolyTlsError::new(TlsHandshake(err.to_string()))),
+        None => Ok(None),
+    }
 }
 
-fn select_upstream_alpn_proto(client_alpn_bytes: Option<&[u8]>) -> Result<Vec<u8>> {
-    match client_alpn_bytes {
-        Some(proto) => {
-            let len = proto.len();
-            if len > 255 {
-                return Err(ErrorKind::TlsHandshake(format!("client ALPN too long: {len}")).into());
-            }
-            let mut v = Vec::with_capacity(1 + len);
-            v.push(len as u8);
-            v.extend_from_slice(proto);
+fn select_upstream_alpn_proto(client_alpn: Option<&AlpnProtocol>) -> Result<Vec<u8>> {
+    match client_alpn {
+        Some(proto) if *proto == AlpnProtocol::H2 => {
+            const CAP: usize =
+                AlpnProtocol::H2.as_bytes().len() + AlpnProtocol::Http11.as_bytes().len() + 2;
+            let mut v = Vec::with_capacity(CAP);
+            v.push(AlpnProtocol::H2.as_bytes().len() as u8);
+            v.extend_from_slice(AlpnProtocol::H2.as_bytes());
+
+            v.push(AlpnProtocol::Http11.as_bytes().len() as u8);
+            v.extend_from_slice(AlpnProtocol::Http11.as_bytes());
+
             Ok(v)
         }
+        Some(proto) if *proto == AlpnProtocol::Http11 => {
+            let mut v = Vec::with_capacity(AlpnProtocol::Http11.as_bytes().len() + 1);
+            v.push(AlpnProtocol::Http11.as_bytes().len() as u8);
+            v.extend_from_slice(AlpnProtocol::Http11.as_bytes());
+            Ok(v)
+        }
+        Some(other) => Err(PolyTlsError::new(TlsHandshake(format!(
+            "Cannot work with {:?}",
+            other
+        )))),
         None => Ok(b"\x08http/1.1".to_vec()),
     }
 }

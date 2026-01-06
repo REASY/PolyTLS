@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -95,6 +96,13 @@ pub struct TestTlsOrigin {
     addr: SocketAddr,
     shutdown_tx: Option<oneshot::Sender<()>>,
     task: JoinHandle<()>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObservedUpstreamHandshake {
+    has_application_settings: bool,
+    has_pre_shared_key: bool,
+    session_reused: bool,
 }
 
 impl TestTlsOrigin {
@@ -187,6 +195,196 @@ impl TestTlsOrigin {
             shutdown_tx: Some(shutdown_tx),
             task,
         }
+    }
+
+    async fn spawn_http_observing_upstream_handshakes(
+        host: &str,
+        ca: &TestCa,
+        alpn_protos: Vec<String>,
+        body: &str,
+    ) -> (Self, mpsc::UnboundedReceiver<ObservedUpstreamHandshake>) {
+        use boring::ssl::{
+            AlpnError, ClientHello, ExtensionType, SelectCertError, Ssl, SslAcceptor, SslMethod,
+        };
+
+        let (leaf_cert, leaf_key) = ca
+            .manager
+            .leaf_for_host(host)
+            .await
+            .expect("origin leaf should be created");
+
+        let mut builder =
+            SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).expect("acceptor");
+        builder
+            .set_certificate(&leaf_cert)
+            .expect("origin cert should be set");
+        builder
+            .set_private_key(&leaf_key)
+            .expect("origin key should be set");
+        builder
+            .check_private_key()
+            .expect("origin key should match");
+        builder
+            .set_session_id_context(b"polytls-test-origin")
+            .expect("session id context");
+
+        fn find_alpn_proto<'a>(client_protos: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
+            let mut idx = 0;
+            while idx < client_protos.len() {
+                let len = *client_protos.get(idx)? as usize;
+                idx += 1;
+                let end = idx.checked_add(len)?;
+                if end > client_protos.len() {
+                    return None;
+                }
+                let proto = &client_protos[idx..end];
+                if proto == wanted {
+                    return Some(proto);
+                }
+                idx = end;
+            }
+            None
+        }
+
+        let mut server_protos = Vec::with_capacity(alpn_protos.len());
+        for proto in &alpn_protos {
+            server_protos.push(proto.as_bytes().to_vec());
+        }
+        builder.set_alpn_select_callback(move |_ssl, client_protos| {
+            for server_proto in &server_protos {
+                if let Some(found) = find_alpn_proto(client_protos, server_proto) {
+                    return Ok(found);
+                }
+            }
+            Err(AlpnError::NOACK)
+        });
+
+        #[derive(Clone, Copy, Debug)]
+        struct ObservedClientHello {
+            has_application_settings: bool,
+            has_pre_shared_key: bool,
+        }
+
+        let hello_idx = Ssl::new_ex_index::<ObservedClientHello>()
+            .expect("ssl ex_data index for observed clienthello");
+
+        builder.set_select_certificate_callback(move |mut hello: ClientHello<'_>| {
+            let has_application_settings = hello
+                .get_extension(ExtensionType::APPLICATION_SETTINGS)
+                .is_some()
+                || hello.get_extension(ExtensionType::from(0x44cd)).is_some();
+            let has_pre_shared_key = hello.get_extension(ExtensionType::PRE_SHARED_KEY).is_some();
+
+            hello.ssl_mut().set_ex_data(
+                hello_idx,
+                ObservedClientHello {
+                    has_application_settings,
+                    has_pre_shared_key,
+                },
+            );
+            Ok::<(), SelectCertError>(())
+        });
+
+        let acceptor = Arc::new(builder.build());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("origin listener should bind");
+        let addr = listener.local_addr().expect("origin addr should resolve");
+
+        let body = body.to_string();
+        let (obs_tx, obs_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept = listener.accept() => {
+                        let (stream, _peer) = match accept {
+                            Ok(v) => v,
+                            Err(err) => {
+                                tracing::warn!(error=%err, "origin accept failed");
+                                break;
+                            }
+                        };
+
+                        let acceptor = acceptor.clone();
+                        let body = body.clone();
+                        let obs_tx = obs_tx.clone();
+                        tokio::spawn(async move {
+                            let mut tls = match tokio_boring::accept(&acceptor, stream).await {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    tracing::warn!(error=%err, "origin TLS accept failed");
+                                    return;
+                                }
+                            };
+
+                            let observed = tls
+                                .ssl()
+                                .ex_data(hello_idx)
+                                .copied()
+                                .unwrap_or(ObservedClientHello {
+                                    has_application_settings: false,
+                                    has_pre_shared_key: false,
+                                });
+                            let _ = obs_tx.send(ObservedUpstreamHandshake {
+                                has_application_settings: observed.has_application_settings,
+                                has_pre_shared_key: observed.has_pre_shared_key,
+                                session_reused: tls.ssl().session_reused(),
+                            });
+
+                            // Read and discard the request headers. If the server closes the
+                            // TCP socket while unread client data is still pending, some
+                            // platforms will abort the connection with RST, which makes the
+                            // tests flaky.
+                            let mut req_buf = Vec::with_capacity(1024);
+                            let mut tmp = [0u8; 1024];
+                            loop {
+                                if req_buf.len() > 16 * 1024 {
+                                    break;
+                                }
+
+                                let read_res = tokio::time::timeout(
+                                    Duration::from_secs(2),
+                                    tls.read(&mut tmp),
+                                )
+                                .await;
+                                let n = match read_res {
+                                    Ok(Ok(n)) => n,
+                                    Ok(Err(_)) => break,
+                                    Err(_) => break,
+                                };
+                                if n == 0 {
+                                    break;
+                                }
+                                req_buf.extend_from_slice(&tmp[..n]);
+                                if memchr::memmem::find(&req_buf, b"\r\n\r\n").is_some() {
+                                    break;
+                                }
+                            }
+
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}",
+                                body.len()
+                            );
+
+                            let _ = tls.write_all(response.as_bytes()).await;
+                            let _ = tls.shutdown().await;
+                        });
+                    }
+                }
+            }
+        });
+
+        (
+            Self {
+                addr,
+                shutdown_tx: Some(shutdown_tx),
+                task,
+            },
+            obs_rx,
+        )
     }
 
     async fn spawn_handshake_only(
@@ -1091,5 +1289,53 @@ async fn mitm_rejects_alpn_mismatch_between_client_and_upstream() {
         write_res.is_err() || read_res.is_err() || !resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
         "expected ALPN mismatch to abort the tunnel, got response: {:?}",
         String::from_utf8_lossy(&resp),
+    );
+}
+
+#[tokio::test]
+async fn mitm_upstream_advertises_alps_and_resumes_sessions() {
+    let origin_ca = TestCa::new("e2e-origin-ca").await;
+    let (origin, mut obs_rx) = TestTlsOrigin::spawn_http_observing_upstream_handshakes(
+        "localhost",
+        &origin_ca,
+        vec!["h2".to_string(), "http/1.1".to_string()],
+        "alps-resume",
+    )
+    .await;
+
+    let ctx = TestContext::from_origin(origin, origin_ca).await;
+
+    let _ = ctx
+        .client()
+        .get("localhost", ctx.origin_addr().port(), &["h2"], &[])
+        .await;
+
+    let first = tokio::time::timeout(Duration::from_secs(2), obs_rx.recv())
+        .await
+        .expect("origin handshake observation should arrive")
+        .expect("origin should send handshake observation");
+
+    assert!(
+        first.has_application_settings,
+        "expected application_settings (ALPS) extension on the first upstream handshake"
+    );
+    assert!(
+        !first.has_pre_shared_key,
+        "first upstream handshake should not offer a PSK"
+    );
+
+    let _ = ctx
+        .client()
+        .get("localhost", ctx.origin_addr().port(), &["h2"], &[])
+        .await;
+
+    let second = tokio::time::timeout(Duration::from_secs(2), obs_rx.recv())
+        .await
+        .expect("origin handshake observation should arrive")
+        .expect("origin should send handshake observation");
+
+    assert!(
+        second.has_pre_shared_key || second.session_reused,
+        "expected the second upstream handshake to attempt or use session resumption"
     );
 }

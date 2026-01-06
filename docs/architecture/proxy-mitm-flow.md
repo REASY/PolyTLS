@@ -31,11 +31,12 @@ Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
 6. Wrap the client socket in `PrefixedStream(connect.leftover, client)` so the next stage sees a contiguous stream ([`src/proxy.rs:212`](../../src/proxy.rs#L212), [`src/prefixed_stream.rs:1`](../../src/prefixed_stream.rs#L1)).
 7. Mint a per-host leaf certificate from the MITM CA, build a TLS server acceptor, then complete the TLS handshake with the client ([`src/proxy.rs:213`](../../src/proxy.rs#L213), [`src/ca.rs:91`](../../src/ca.rs#L91), [`src/mitm.rs:16`](../../src/mitm.rs#L16)).
 8. Validate that the client's SNI matches the CONNECT host ([`src/proxy.rs:220`](../../src/proxy.rs#L220), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
-9. Configure and connect upstream TLS using the selected profile and verification policy ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/profile.rs:217`](../../src/profile.rs#L217)).
+9. Configure and connect upstream TLS using the selected profile and verification policy. PolyTLS also applies an (in‑memory) upstream session cache keyed by `host:port`, so repeated connections may offer TLS resumption (`pre_shared_key`) ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/proxy.rs:242`](../../src/proxy.rs#L242), [`src/profile.rs:345`](../../src/profile.rs#L345)).
 10. Ensure the client and upstream negotiated compatible ALPN to avoid protocol confusion:
     - If client selected an ALPN protocol (e.g. `h2`), forces upstream connection to use ONLY that protocol.
     - If upstream negotiation fails or mismatches (rare due to constraint), the connection is aborted.
     - If client had no ALPN, defaults upstream to `http/1.1`. ([`src/proxy.rs:241`](../../src/proxy.rs#L241)).
+    - If the client negotiated `h2` and the upstream profile enables ALPS for `h2`, PolyTLS adds the `application_settings` (ALPS) extension to the upstream handshake ([`src/proxy.rs:268`](../../src/proxy.rs#L268), [`src/profile.rs:316`](../../src/profile.rs#L316)).
 11. Relay application bytes until shutdown using `tokio::io::copy_bidirectional` ([`src/proxy.rs:259`](../../src/proxy.rs#L259)).
 
 ## Why `copy_bidirectional` works here
@@ -76,3 +77,10 @@ In PolyTLS, these values are applied via BoringSSL's `set_curves_list` (supporte
 - `ssl_name_to_group_id` lookup: https://github.com/google/boringssl/blob/a6f3c4c14e6515c8c7f213032be8dee3f18a9b19/ssl/ssl_key_share.cc#L496-L511
 
 As a result, attempting to configure `ffdhe2048`/`ffdhe3072` via `curves_list` fails, and reproducing Firefox's full `supported_groups` list would require patching/forking BoringSSL rather than just configuration.
+
+## BoringSSL ALPS codepoint caveat (`application_settings`)
+JA4 considers extension IDs, so the ALPS `application_settings` codepoint matters for fingerprint parity.
+
+- PolyTLS enables ALPS via BoringSSL’s `SSL_add_application_settings` ([`src/profile.rs:316`](../../src/profile.rs#L316)).
+- The BoringSSL snapshot currently vendored by `boring-sys` defines `TLSEXT_TYPE_application_settings` as `17513` (`0x4469`), which differs from what Chrome reports (`17613` / `0x44cd`).
+- Newer BoringSSL versions define both old and new codepoints and select between them using an internal `alps_use_new_codepoint` flag. That flag/codepoint is not available with the currently vendored snapshot, so PolyTLS cannot emit `0x44cd` without building against a newer BoringSSL (tracked in https://github.com/cloudflare/boring/issues/340).
