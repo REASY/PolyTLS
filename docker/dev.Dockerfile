@@ -11,7 +11,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
-      build-essential cmake libclang-dev iputils-ping net-tools curl binutils python3 pkg-config \
+      golang-go build-essential cmake libclang-dev iputils-ping net-tools curl binutils python3 pkg-config \
       ca-certificates libdw-dev libssl-dev libsasl2-dev git unzip && \
     apt-get upgrade -y && \
     rm -rf /var/lib/apt/lists/*
