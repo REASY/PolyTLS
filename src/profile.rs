@@ -2,7 +2,7 @@ use crate::compress::{CertCompression, register_certificate_compression};
 use crate::error::{ErrorKind, Result};
 use boring::ex_data::Index;
 use boring::ssl::{
-    Ssl, SslConnector, SslContext, SslMethod, SslRef, SslSession, SslSessionCacheMode,
+    Ssl, SslConnector, SslContext, SslMethod, SslOptions, SslRef, SslSession, SslSessionCacheMode,
     SslVerifyMode, SslVersion,
 };
 use foreign_types::ForeignTypeRef;
@@ -31,9 +31,10 @@ const FIREFOX_TLS12_CIPHER_LIST: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA
      ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
      AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
 const SAFARI_CURVES_LIST: &str = "X25519MLKEM768:X25519:P-256:P-384:P-521";
-const SAFARI_SIGALGS_LIST: &str = "rsa_pkcs1_sha256:ecdsa_secp256r1_sha256:rsa_pkcs1_sha384:ecdsa_secp384r1_sha384:\
-     rsa_pkcs1_sha512:rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:rsa_pkcs1_sha1";
-const SAFARI_TLS12_CIPHER_LIST: &str = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:\
+const SAFARI_SIGALGS_LIST: &str = "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:\
+     ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
+     rsa_pss_rsae_sha512:rsa_pkcs1_sha512:rsa_pkcs1_sha1";
+const SAFARI_TLS12_CIPHER_LIST: &str = "ECDHE-ECDSA-DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:\
      ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES256-GCM-SHA384:\
      ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305:\
      ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:\
@@ -45,9 +46,11 @@ const SAFARI_TLS12_CIPHER_LIST: &str = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDS
 pub struct UpstreamProfile {
     pub alpn_protos: Vec<String>,
     pub alps_protos: Vec<String>,
+    pub alps_use_new_codepoint: bool,
     pub grease: bool,
     pub enable_ech_grease: bool,
     pub permute_extensions: bool,
+    pub disable_session_ticket: bool,
     pub curves_list: Option<String>,
     pub cipher_list: Option<String>,
     pub sigalgs_list: Option<String>,
@@ -70,9 +73,11 @@ impl UpstreamProfile {
         Self {
             alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
             alps_protos: vec!["h2".to_string()],
+            alps_use_new_codepoint: true,
             grease: true,
             enable_ech_grease: true,
             permute_extensions: true,
+            disable_session_ticket: false,
             curves_list: Some(CHROME_CURVES_LIST.to_string()),
             cipher_list: Some(CHROME_TLS12_CIPHER_LIST.to_string()),
             sigalgs_list: Some(CHROME_SIGALGS_LIST.to_string()),
@@ -89,9 +94,11 @@ impl UpstreamProfile {
         Self {
             alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
             alps_protos: Vec::new(),
+            alps_use_new_codepoint: false,
             grease: false,
             enable_ech_grease: true,
             permute_extensions: false,
+            disable_session_ticket: false,
             curves_list: Some(FIREFOX_CURVES_LIST.to_string()),
             cipher_list: Some(FIREFOX_TLS12_CIPHER_LIST.to_string()),
             sigalgs_list: Some(FIREFOX_SIGALGS_LIST.to_string()),
@@ -111,9 +118,11 @@ impl UpstreamProfile {
         Self {
             alpn_protos: vec!["h2".to_string(), "http/1.1".to_string()],
             alps_protos: Vec::new(),
+            alps_use_new_codepoint: false,
             grease: true,
             enable_ech_grease: false,
             permute_extensions: false,
+            disable_session_ticket: true,
             curves_list: Some(SAFARI_CURVES_LIST.to_string()),
             cipher_list: Some(SAFARI_TLS12_CIPHER_LIST.to_string()),
             sigalgs_list: Some(SAFARI_SIGALGS_LIST.to_string()),
@@ -235,6 +244,10 @@ pub fn build_upstream_connector(
         .set_alpn_protos(&encode_alpn_protos(&profile.alpn_protos)?)
         .map_err(|e| ErrorKind::Config(format!("failed to set ALPN protos: {e}")))?;
 
+    if profile.disable_session_ticket {
+        builder.set_options(SslOptions::NO_TICKET);
+    }
+
     if let Some(ca_file) = &verification.ca_file {
         builder
             .set_ca_file(ca_file)
@@ -342,6 +355,10 @@ pub(crate) fn add_application_settings(
     Ok(())
 }
 
+pub(crate) fn set_alps_use_new_codepoint(ssl: &mut SslRef, enabled: bool) {
+    unsafe { boring_sys::SSL_set_alps_use_new_codepoint(ssl.as_ptr(), i32::from(enabled)) }
+}
+
 fn init_session_resumption(builder: &mut boring::ssl::SslConnectorBuilder) {
     let cache: UpstreamSessionCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -394,6 +411,67 @@ pub fn encode_alpn_protos(protos: &[String]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn self_signed_cert(
+        host: &str,
+    ) -> (
+        boring::x509::X509,
+        boring::pkey::PKey<boring::pkey::Private>,
+    ) {
+        use boring::asn1::Asn1Time;
+        use boring::bn::BigNum;
+        use boring::hash::MessageDigest;
+        use boring::pkey::PKey;
+        use boring::rsa::Rsa;
+        use boring::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
+        use boring::x509::{X509, X509NameBuilder};
+
+        let rsa = Rsa::generate(2048).expect("rsa key");
+        let key = PKey::from_rsa(rsa).expect("pkey");
+
+        let mut name = X509NameBuilder::new().expect("x509 name");
+        name.append_entry_by_text("CN", host).expect("CN");
+        let name = name.build();
+
+        let mut builder = X509::builder().expect("x509 builder");
+        builder.set_version(2).expect("version");
+        builder.set_subject_name(&name).expect("subject");
+        builder.set_issuer_name(&name).expect("issuer");
+        builder.set_pubkey(&key).expect("pubkey");
+
+        let serial = BigNum::from_u32(1)
+            .expect("serial")
+            .to_asn1_integer()
+            .expect("serial asn1");
+        builder.set_serial_number(&serial).expect("serial set");
+
+        let not_before = Asn1Time::days_from_now(0).expect("not_before");
+        let not_after = Asn1Time::days_from_now(1).expect("not_after");
+        builder.set_not_before(&not_before).expect("not_before set");
+        builder.set_not_after(&not_after).expect("not_after set");
+
+        let ext = BasicConstraints::new().critical().build().expect("bc");
+        builder.append_extension(&ext).expect("bc ext");
+        let ext1 = KeyUsage::new()
+            .critical()
+            .digital_signature()
+            .key_encipherment()
+            .build()
+            .expect("ku");
+        builder.append_extension(&ext1).expect("ku ext");
+
+        let san = {
+            let ctx = builder.x509v3_context(None, None);
+            SubjectAlternativeName::new()
+                .dns(host)
+                .build(&ctx)
+                .expect("san")
+        };
+        builder.append_extension(&san).expect("san ext");
+
+        builder.sign(&key, MessageDigest::sha256()).expect("sign");
+        (builder.build(), key)
+    }
 
     #[test]
     fn build_upstream_connector_default_profile_does_not_error() {
@@ -463,5 +541,166 @@ mod tests {
             .expect_err("unknown profile should error");
 
         assert!(matches!(err.kind(), ErrorKind::UnknownUpstreamProfile(_)));
+    }
+
+    #[tokio::test]
+    async fn safari_profile_does_not_advertise_session_ticket_extension() {
+        use boring::ssl::{ClientHello, ExtensionType, SelectCertError, SslAcceptor, SslMethod};
+        use std::sync::{Arc, Mutex};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let host = "example.com";
+        let (cert, key) = self_signed_cert(host);
+
+        let mut builder =
+            SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).expect("acceptor");
+        builder
+            .set_certificate(&cert)
+            .expect("server cert should be set");
+        builder
+            .set_private_key(&key)
+            .expect("server key should be set");
+        builder
+            .check_private_key()
+            .expect("server key should match");
+        builder
+            .set_session_id_context(b"polytls-test-session-ticket")
+            .expect("session id context");
+
+        let observed: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let observed_cb = observed.clone();
+
+        builder.set_select_certificate_callback(move |hello: ClientHello<'_>| {
+            let has_ticket = hello.get_extension(ExtensionType::from(0x0023)).is_some();
+            *observed_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(has_ticket);
+            Ok::<(), SelectCertError>(())
+        });
+
+        let acceptor = Arc::new(builder.build());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _tls = tokio_boring::accept(&acceptor, stream)
+                .await
+                .expect("tls accept");
+        });
+
+        let verification = UpstreamVerification {
+            insecure_skip_verify: true,
+            verify_hostname: false,
+            ca_file: None,
+        };
+        let connector =
+            build_upstream_connector(&UpstreamProfile::safari_26_2_macos_arm64(), &verification)
+                .expect("connector");
+        let mut connect_config = connector.configure().expect("configure");
+        connect_config.set_verify_hostname(false);
+
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let _tls = tokio_boring::connect(connect_config, host, stream)
+            .await
+            .expect("tls connect");
+
+        server.await.expect("server task");
+
+        let has_ticket = observed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect("observation should be recorded");
+        assert!(
+            !has_ticket,
+            "safari profile should not advertise session_ticket (0x0023)"
+        );
+    }
+
+    #[tokio::test]
+    async fn chrome_profile_uses_new_alps_codepoint() {
+        use boring::ssl::{ClientHello, ExtensionType, SelectCertError, SslAcceptor, SslMethod};
+        use std::sync::{Arc, Mutex};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let host = "example.com";
+        let (cert, key) = self_signed_cert(host);
+
+        let mut builder =
+            SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).expect("acceptor");
+        builder
+            .set_certificate(&cert)
+            .expect("server cert should be set");
+        builder
+            .set_private_key(&key)
+            .expect("server key should be set");
+        builder
+            .check_private_key()
+            .expect("server key should match");
+        builder
+            .set_session_id_context(b"polytls-test-alps-codepoint")
+            .expect("session id context");
+
+        let observed_new: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let observed_old: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+        let observed_new_cb = observed_new.clone();
+        let observed_old_cb = observed_old.clone();
+
+        builder.set_select_certificate_callback(move |hello: ClientHello<'_>| {
+            let has_new = hello.get_extension(ExtensionType::from(0x44cd)).is_some();
+            let has_old = hello.get_extension(ExtensionType::from(0x4469)).is_some();
+            *observed_new_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(has_new);
+            *observed_old_cb.lock().unwrap_or_else(|e| e.into_inner()) = Some(has_old);
+            Ok::<(), SelectCertError>(())
+        });
+
+        let acceptor = Arc::new(builder.build());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let _tls = tokio_boring::accept(&acceptor, stream)
+                .await
+                .expect("tls accept");
+        });
+
+        let verification = UpstreamVerification {
+            insecure_skip_verify: true,
+            verify_hostname: false,
+            ca_file: None,
+        };
+        let profile = UpstreamProfile::chrome_143_macos_arm64();
+        let connector = build_upstream_connector(&profile, &verification).expect("connector");
+        let mut connect_config = connector.configure().expect("configure");
+        connect_config.set_verify_hostname(false);
+        set_alps_use_new_codepoint(&mut connect_config, profile.alps_use_new_codepoint);
+        add_application_settings(&mut connect_config, "h2", &[]).expect("alps config");
+
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let _tls = tokio_boring::connect(connect_config, host, stream)
+            .await
+            .expect("tls connect");
+
+        server.await.expect("server task");
+
+        let has_new = observed_new
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect("new codepoint observation should be recorded");
+        let has_old = observed_old
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expect("old codepoint observation should be recorded");
+
+        assert!(has_new, "chrome profile should advertise ALPS (0x44cd)");
+        assert!(
+            !has_old,
+            "chrome profile should not advertise legacy ALPS codepoint (0x4469)"
+        );
     }
 }

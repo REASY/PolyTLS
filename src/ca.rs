@@ -147,14 +147,14 @@ fn generate_root_ca() -> std::result::Result<(PKey<Private>, X509), boring::erro
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
-    builder.append_extension(BasicConstraints::new().critical().ca().build()?)?;
-    builder.append_extension(
-        KeyUsage::new()
-            .critical()
-            .key_cert_sign()
-            .crl_sign()
-            .build()?,
-    )?;
+    let basic_constraints_ext = BasicConstraints::new().critical().ca().build()?;
+    builder.append_extension(&basic_constraints_ext)?;
+    let key_usage_ext = KeyUsage::new()
+        .critical()
+        .key_cert_sign()
+        .crl_sign()
+        .build()?;
+    builder.append_extension(&key_usage_ext)?;
 
     // For self-signed roots, BoringSSL's AKI builder expects the issuer to already have an SKI.
     // Build+append SKI first, then build AKI.
@@ -162,7 +162,7 @@ fn generate_root_ca() -> std::result::Result<(PKey<Private>, X509), boring::erro
         let ctx = builder.x509v3_context(None, None);
         SubjectKeyIdentifier::new().build(&ctx)?
     };
-    builder.append_extension(ski)?;
+    builder.append_extension(&ski)?;
 
     let aki = {
         let ctx = builder.x509v3_context(None, None);
@@ -171,7 +171,7 @@ fn generate_root_ca() -> std::result::Result<(PKey<Private>, X509), boring::erro
             .build(&ctx)
             .or_else(|_| AuthorityKeyIdentifier::new().issuer(true).build(&ctx))?
     };
-    builder.append_extension(aki)?;
+    builder.append_extension(&aki)?;
 
     builder.sign(&key, MessageDigest::sha256())?;
     Ok((key, builder.build()))
@@ -203,21 +203,24 @@ fn generate_leaf_cert(
     builder.set_not_before(&not_before)?;
     builder.set_not_after(&not_after)?;
 
-    builder.append_extension(BasicConstraints::new().critical().build()?)?;
-    builder.append_extension(
-        KeyUsage::new()
-            .critical()
-            .digital_signature()
-            .key_encipherment()
-            .build()?,
-    )?;
-    builder.append_extension(ExtendedKeyUsage::new().server_auth().build()?)?;
+    let basic_constraints_ext = BasicConstraints::new().critical().build()?;
+    builder.append_extension(&basic_constraints_ext)?;
+
+    let ket_usage_ext = KeyUsage::new()
+        .critical()
+        .digital_signature()
+        .key_encipherment()
+        .build()?;
+    builder.append_extension(&ket_usage_ext)?;
+
+    let extended_key_usage_ext = ExtendedKeyUsage::new().server_auth().build()?;
+    builder.append_extension(&extended_key_usage_ext)?;
 
     let ski = {
         let ctx = builder.x509v3_context(Some(ca_cert), None);
         SubjectKeyIdentifier::new().build(&ctx)?
     };
-    builder.append_extension(ski)?;
+    builder.append_extension(&ski)?;
 
     let aki = {
         let ctx = builder.x509v3_context(Some(ca_cert), None);
@@ -226,7 +229,7 @@ fn generate_leaf_cert(
             .build(&ctx)
             .or_else(|_| AuthorityKeyIdentifier::new().issuer(true).build(&ctx))?
     };
-    builder.append_extension(aki)?;
+    builder.append_extension(&aki)?;
 
     let san = {
         let ctx = builder.x509v3_context(Some(ca_cert), None);
@@ -234,7 +237,7 @@ fn generate_leaf_cert(
         san.dns(host);
         san.build(&ctx)?
     };
-    builder.append_extension(san)?;
+    builder.append_extension(&san)?;
 
     builder.sign(ca_key, MessageDigest::sha256())?;
     Ok((builder.build(), key))

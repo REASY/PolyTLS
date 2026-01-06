@@ -115,7 +115,7 @@ Passthrough mode (tunnels TLS end-to-end):
 - [x] **Extension permutation** via `set_permute_extensions` (optional per profile) ([`src/profile.rs`](../../src/profile.rs#L223))
 - [x] **ALPN list** (profile-driven) ([`src/profile.rs`](../../src/profile.rs#L224))
 - [x] **Session resumption (PSK / `pre_shared_key`)** via a per-profile client session cache; requires a subsequent connection to the same `host:port` ([`src/profile.rs`](../../src/profile.rs#L345), [`src/proxy.rs`](../../src/proxy.rs#L242))
-- [x] **Application Settings (ALPS / `application_settings`)** for `h2` via `SSL_add_application_settings` ([`src/profile.rs`](../../src/profile.rs#L316), [`src/proxy.rs`](../../src/proxy.rs#L268))
+- [x] **Application Settings (ALPS / `application_settings`)** for `h2` via `SSL_add_application_settings` + `SSL_set_alps_use_new_codepoint` (0x44cd) ([`src/profile.rs`](../../src/profile.rs#L329), [`src/profile.rs`](../../src/profile.rs#L358), [`src/proxy.rs`](../../src/proxy.rs#L279))
 - [x] **Supported groups / named curves** via `set_curves_list` ([`src/profile.rs`](../../src/profile.rs#L262))
 - [x] **TLS 1.2 cipher list** via `set_cipher_list` ([`src/profile.rs`](../../src/profile.rs#L240))
 - [x] **Signature algorithms list** via `set_sigalgs_list` ([`src/profile.rs`](../../src/profile.rs#L246))
@@ -130,7 +130,6 @@ Passthrough mode (tunnels TLS end-to-end):
 #### 3.1.2 Not Implemented / Future Modifications
 - [ ] **TLS 1.3 cipher suite list control** (only TLS 1.2 cipher list is configurable today)
 - [ ] **Fine-grained session ticket / resumption knobs** (external PSKs, 0‑RTT policy, cache sizing/eviction/expiry policy, etc.)
-- [ ] **ALPS new codepoint (0x44cd) parity with Chrome** (see "ALPS codepoint caveat" below)
 - [ ] **Custom extension injection / byte-for-byte ClientHello reproduction**
 - [ ] **Record layer version manipulation**
 
@@ -186,7 +185,7 @@ BoringSSL exposes fewer knobs than "raw ClientHello crafting". For an MVP, focus
 - Version-dependent / library-limited: controlling the exact offered signature algorithms, OCSP/SCT offering behavior, certificate compression, and application settings.
 - Typically requires patching/forking BoringSSL (or pinning to a very specific commit): arbitrary custom extension injection, byte-for-byte reproduction of a third-party ClientHello (including extension ordering/values beyond exposed config), and record-layer version "tricks".
 
-**ALPS codepoint caveat (JA4 impact)**: PolyTLS enables ALPS via `SSL_add_application_settings` ([`src/profile.rs`](../../src/profile.rs#L316)), but the `boring`/`boring-sys` crates currently vendor an older BoringSSL snapshot where `TLSEXT_TYPE_application_settings` is the legacy value `17513` (`0x4469`). Chrome reports the newer draft codepoint `17613` (`0x44cd`), guarded in newer BoringSSL by an internal `alps_use_new_codepoint` flag. Until `boring-sys` vendors a newer BoringSSL (or PolyTLS builds against a newer BoringSSL via `BORING_BSSL_SOURCE_PATH`), JA4 extension IDs will not exactly match Chrome’s for this extension. Tracking issue: https://github.com/cloudflare/boring/issues/340.
+**ALPS codepoint selection (JA4 impact)**: PolyTLS enables ALPS via `SSL_add_application_settings` ([`src/profile.rs`](../../src/profile.rs#L329)). Modern Chrome reports the newer draft codepoint `17613` (`0x44cd`). When ALPS is enabled, PolyTLS can switch to the newer codepoint via `SSL_set_alps_use_new_codepoint` ([`src/profile.rs`](../../src/profile.rs#L358)), which is applied per upstream connection in `handle_mitm` ([`src/proxy.rs`](../../src/proxy.rs#L279)). You can override this per profile via `profiles.<name>.alps_use_new_codepoint` ([`src/config.rs`](../../src/config.rs#L59)).
 
 
 ### 4.2 Configuration Format
@@ -411,6 +410,7 @@ Operational notes:
 ### 8.1 Technical Risks
 
 -   **BoringSSL API instability / snapshot lag**: the Rust `boring`/`boring-sys` crates vendor a BoringSSL snapshot; it may lag upstream and cause fingerprint deltas even when PolyTLS uses the right API (example: ALPS `application_settings` codepoint `0x4469` vs Chrome’s `0x44cd`). Track https://github.com/cloudflare/boring/issues/340.
+-   **BoringSSL API instability / snapshot lag**: PolyTLS pins `boring`/`boring-sys` to a specific BoringSSL snapshot; missing or changing APIs may cause fingerprint deltas until the snapshot is updated (example: ALPS `application_settings` codepoint selection depends on `SSL_set_alps_use_new_codepoint`). Track https://github.com/cloudflare/boring/issues/340.
 
 -   **Certificate revocation**: Implement OCSP stapling where possible
 

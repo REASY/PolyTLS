@@ -106,12 +106,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "autocfg"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
-
-[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -144,8 +138,7 @@ checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 [[package]]
 name = "boring"
 version = "4.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4acbe9eda68fc7fbfb395aace52dfc37075928536ec2f149abce54dbd40e38d5"
+source = "git+https://github.com/cloudflare/boring.git?rev=8dfa471c864e40b11e1ff29b1d95858987fc6a78#8dfa471c864e40b11e1ff29b1d95858987fc6a78"
 dependencies = [
  "bitflags",
  "boring-sys",
@@ -157,10 +150,8 @@ dependencies = [
 [[package]]
 name = "boring-sys"
 version = "4.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08c9f08dc17fab4192e5e6b0920e6c06eb9e3e4ab98b9cff00368dfe6d1e30c9"
+source = "git+https://github.com/cloudflare/boring.git?rev=8dfa471c864e40b11e1ff29b1d95858987fc6a78#8dfa471c864e40b11e1ff29b1d95858987fc6a78"
 dependencies = [
- "autocfg",
  "bindgen",
  "cmake",
  "fs_extra",
@@ -1746,8 +1737,7 @@ dependencies = [
 [[package]]
 name = "tokio-boring"
 version = "4.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a5b1722d42be029aa3ef0b0f4dd4554b44409eb2af5da60159008f936525be3"
+source = "git+https://github.com/cloudflare/boring.git?rev=8dfa471c864e40b11e1ff29b1d95858987fc6a78#8dfa471c864e40b11e1ff29b1d95858987fc6a78"
 dependencies = [
  "boring",
  "boring-sys",

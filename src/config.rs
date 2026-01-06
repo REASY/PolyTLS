@@ -53,9 +53,18 @@ pub struct UpstreamConfig {
 #[derive(Debug, Deserialize)]
 pub struct UpstreamProfileConfig {
     pub alpn_protos: Option<Vec<String>>,
+    /// When ALPS is enabled (via `SSL_add_application_settings`), switches the
+    /// `application_settings` extension codepoint from legacy `0x4469` (17513)
+    /// to the newer draft value `0x44cd` (17613).
+    pub alps_use_new_codepoint: Option<bool>,
     pub grease: Option<bool>,
     pub enable_ech_grease: Option<bool>,
     pub permute_extensions: Option<bool>,
+    /// Disables advertising the legacy `session_ticket` TLS extension (0x0023).
+    ///
+    /// This affects the proxy→upstream ClientHello and can be useful for matching the
+    /// fingerprint of clients that do not send this extension (e.g., Safari).
+    pub disable_session_ticket: Option<bool>,
     pub curves_list: Option<String>,
     pub cipher_list: Option<String>,
     pub sigalgs_list: Option<String>,

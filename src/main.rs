@@ -319,6 +319,9 @@ fn apply_upstream_profile_config(
     if let Some(v) = cfg.alpn_protos.as_ref() {
         profile.alpn_protos = v.clone();
     }
+    if let Some(v) = cfg.alps_use_new_codepoint {
+        profile.alps_use_new_codepoint = v;
+    }
     if let Some(v) = cfg.grease {
         profile.grease = v;
     }
@@ -327,6 +330,9 @@ fn apply_upstream_profile_config(
     }
     if let Some(v) = cfg.permute_extensions {
         profile.permute_extensions = v;
+    }
+    if let Some(v) = cfg.disable_session_ticket {
+        profile.disable_session_ticket = v;
     }
     if let Some(v) = cfg.curves_list.as_ref() {
         profile.curves_list = Some(v.clone());
@@ -437,9 +443,11 @@ mod tests {
         let base = UpstreamProfile::chrome_143_macos_arm64();
         let cfg = config::UpstreamProfileConfig {
             alpn_protos: Some(vec!["h2".to_string(), "http/1.1".to_string()]),
+            alps_use_new_codepoint: None,
             grease: Some(false),
             enable_ech_grease: None,
             permute_extensions: Some(false),
+            disable_session_ticket: None,
             curves_list: None,
             cipher_list: None,
             sigalgs_list: None,

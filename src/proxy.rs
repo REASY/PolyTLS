@@ -4,7 +4,10 @@ use crate::error::{ErrorKind, PolyTlsError, Result};
 use crate::http_connect::{ConnectError, read_connect_request};
 use crate::mitm::{MitmState, build_client_acceptor, sni_mismatch};
 use crate::prefixed_stream::PrefixedStream;
-use crate::profile::{add_application_settings, set_upstream_session_key, upstream_session_cache};
+use crate::profile::{
+    add_application_settings, set_alps_use_new_codepoint, set_upstream_session_key,
+    upstream_session_cache,
+};
 use boring::ssl::NameType;
 use std::net::SocketAddr;
 use tokio::io::{AsyncWriteExt, copy_bidirectional};
@@ -273,6 +276,7 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
             .iter()
             .any(|proto| proto == "h2")
     {
+        set_alps_use_new_codepoint(&mut connect_config, upstream_profile.alps_use_new_codepoint);
         add_application_settings(&mut connect_config, "h2", &[])?;
     }
 

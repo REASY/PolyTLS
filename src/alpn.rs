@@ -152,7 +152,11 @@ impl AlpnProtocol {
             b"h3-30" => Self::H3Draft30,
             b"h3-31" => Self::H3Draft31,
             b"h3-32" => Self::H3Draft32,
-            _ => return Err(UnknownAlpnProtocol { bytes: bytes.to_vec() }),
+            _ => {
+                return Err(UnknownAlpnProtocol {
+                    bytes: bytes.to_vec(),
+                });
+            }
         };
         Ok(protocol)
     }
@@ -227,7 +231,10 @@ mod tests {
         ];
 
         for (proto, bytes) in cases {
-            assert_eq!(AlpnProtocol::from_bytes(bytes).expect("should parse known ALPN"), proto);
+            assert_eq!(
+                AlpnProtocol::from_bytes(bytes).expect("should parse known ALPN"),
+                proto
+            );
             assert_eq!(proto.as_bytes(), bytes);
             assert_eq!(format!("{}", proto), String::from_utf8_lossy(bytes));
         }

@@ -36,7 +36,7 @@ Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
     - If client selected an ALPN protocol (e.g. `h2`), forces upstream connection to use ONLY that protocol.
     - If upstream negotiation fails or mismatches (rare due to constraint), the connection is aborted.
     - If client had no ALPN, defaults upstream to `http/1.1`. ([`src/proxy.rs:241`](../../src/proxy.rs#L241)).
-    - If the client negotiated `h2` and the upstream profile enables ALPS for `h2`, PolyTLS adds the `application_settings` (ALPS) extension to the upstream handshake ([`src/proxy.rs:268`](../../src/proxy.rs#L268), [`src/profile.rs:316`](../../src/profile.rs#L316)).
+    - If the client negotiated `h2` and the upstream profile enables ALPS for `h2`, PolyTLS configures the ALPS codepoint (if enabled) and adds the `application_settings` (ALPS) extension to the upstream handshake ([`src/proxy.rs`](../../src/proxy.rs#L279), [`src/profile.rs`](../../src/profile.rs#L329), [`src/profile.rs`](../../src/profile.rs#L358)).
 11. Relay application bytes until shutdown using `tokio::io::copy_bidirectional` ([`src/proxy.rs:259`](../../src/proxy.rs#L259)).
 
 ## Why `copy_bidirectional` works here
@@ -81,6 +81,7 @@ As a result, attempting to configure `ffdhe2048`/`ffdhe3072` via `curves_list` f
 ## BoringSSL ALPS codepoint caveat (`application_settings`)
 JA4 considers extension IDs, so the ALPS `application_settings` codepoint matters for fingerprint parity.
 
-- PolyTLS enables ALPS via BoringSSL’s `SSL_add_application_settings` ([`src/profile.rs:316`](../../src/profile.rs#L316)).
-- The BoringSSL snapshot currently vendored by `boring-sys` defines `TLSEXT_TYPE_application_settings` as `17513` (`0x4469`), which differs from what Chrome reports (`17613` / `0x44cd`).
-- Newer BoringSSL versions define both old and new codepoints and select between them using an internal `alps_use_new_codepoint` flag. That flag/codepoint is not available with the currently vendored snapshot, so PolyTLS cannot emit `0x44cd` without building against a newer BoringSSL (tracked in https://github.com/cloudflare/boring/issues/340).
+- PolyTLS enables ALPS via BoringSSL’s `SSL_add_application_settings` ([`src/profile.rs`](../../src/profile.rs#L329)).
+- BoringSSL supports switching from the legacy `application_settings` codepoint `17513` (`0x4469`) to the newer draft codepoint `17613` (`0x44cd`) via `SSL_set_alps_use_new_codepoint` ([`src/profile.rs`](../../src/profile.rs#L358)).
+- PolyTLS applies this per upstream connection in `handle_mitm` ([`src/proxy.rs`](../../src/proxy.rs#L279)) based on the selected upstream profile (`UpstreamProfile.alps_use_new_codepoint`).
+- You can override it per configured profile via `profiles.<name>.alps_use_new_codepoint` ([`src/config.rs`](../../src/config.rs#L59)).
