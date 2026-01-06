@@ -11,7 +11,7 @@ Docs: [docs/README.md](docs/README.md). Use this only on systems and traffic you
 
 https://github.com/user-attachments/assets/3c2567d8-398a-4cdc-8307-54ef5b8873b2
 
-![curl.png](docs/demo/curl.png)
+![curl.png](docs/demo/curl_v2.png)
 
 ## Architecture
 
