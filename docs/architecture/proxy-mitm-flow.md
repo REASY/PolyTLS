@@ -22,22 +22,22 @@ Diagram source: [mitm-context.puml](../diagrams/c4/mitm-context.puml).
 Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
 
 ## Step-by-step
-1. Read and parse the client's `CONNECT host:port` request; keep any bytes read past `\r\n\r\n` as `connect.leftover` ([`src/proxy.rs:149`](../../src/proxy.rs#L149), [`src/http_connect.rs:36`](../../src/http_connect.rs#L36)).
-   - Optional: extract `X-PolyTLS-Upstream-Profile` to select an upstream TLS profile ([`src/http_connect.rs:7`](../../src/http_connect.rs#L7), [`src/http_connect.rs:84`](../../src/http_connect.rs#L84)).
-2. Select the upstream TLS profile and fetch/build a cached `SslConnector` (unknown profile → `400`, other failures → `502`) ([`src/proxy.rs:157`](../../src/proxy.rs#L157), [`src/profile.rs:158`](../../src/profile.rs#L158)).
-3. Dial upstream TCP with a timeout; send `502`/`504` on connect/timeout failures ([`src/proxy.rs:184`](../../src/proxy.rs#L184)).
-4. Reply `HTTP/1.1 200 Connection Established` ([`src/proxy.rs:201`](../../src/proxy.rs#L201)).
-5. Load the selected `UpstreamProfile` (mainly for the ALPN list used on the client-facing TLS acceptor) ([`src/proxy.rs:203`](../../src/proxy.rs#L203), [`src/profile.rs:154`](../../src/profile.rs#L154)).
-6. Wrap the client socket in `PrefixedStream(connect.leftover, client)` so the next stage sees a contiguous stream ([`src/proxy.rs:212`](../../src/proxy.rs#L212), [`src/prefixed_stream.rs:1`](../../src/prefixed_stream.rs#L1)).
-7. Mint a per-host leaf certificate from the MITM CA, build a TLS server acceptor, then complete the TLS handshake with the client ([`src/proxy.rs:213`](../../src/proxy.rs#L213), [`src/ca.rs:91`](../../src/ca.rs#L91), [`src/mitm.rs:16`](../../src/mitm.rs#L16)).
-8. Validate that the client's SNI matches the CONNECT host ([`src/proxy.rs:220`](../../src/proxy.rs#L220), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
-9. Configure and connect upstream TLS using the selected profile and verification policy. PolyTLS also applies an (in‑memory) upstream session cache keyed by `host:port`, so repeated connections may offer TLS resumption (`pre_shared_key`) ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/proxy.rs:242`](../../src/proxy.rs#L242), [`src/profile.rs:345`](../../src/profile.rs#L345)).
+1. Read and parse the client's `CONNECT host:port` request; keep any bytes read past `\r\n\r\n` as `connect.leftover` ([`src/proxy.rs:164`](../../src/proxy.rs#L164), [`src/http_connect.rs:36`](../../src/http_connect.rs#L36)).
+   - Optional: extract `X-PolyTLS-Upstream-Profile` to select an upstream TLS profile ([`src/http_connect.rs:7`](../../src/http_connect.rs#L7), [`src/http_connect.rs:92`](../../src/http_connect.rs#L92)).
+2. Select the upstream TLS profile and fetch/build a cached `SslConnector` (unknown profile → `400`, other failures → `502`) ([`src/proxy.rs:175`](../../src/proxy.rs#L175), [`src/profile.rs:158`](../../src/profile.rs#L158)).
+3. Dial upstream TCP with a timeout; send `502`/`504` on connect/timeout failures ([`src/proxy.rs:200`](../../src/proxy.rs#L200)).
+4. Reply `HTTP/1.1 200 Connection Established` ([`src/proxy.rs:216`](../../src/proxy.rs#L216)).
+5. Load the selected `UpstreamProfile` (mainly for the ALPN list used on the client-facing TLS acceptor) ([`src/proxy.rs:220`](../../src/proxy.rs#L220), [`src/profile.rs:154`](../../src/profile.rs#L154)).
+6. Wrap the client socket in `PrefixedStream(connect.leftover, client)` so the next stage sees a contiguous stream ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/prefixed_stream.rs:1`](../../src/prefixed_stream.rs#L1)).
+7. Mint a per-host leaf certificate from the MITM CA, build a TLS server acceptor, then complete the TLS handshake with the client ([`src/proxy.rs:228`](../../src/proxy.rs#L228), [`src/ca.rs:91`](../../src/ca.rs#L91), [`src/mitm.rs:16`](../../src/mitm.rs#L16)).
+8. Validate that the client's SNI matches the CONNECT host ([`src/proxy.rs:235`](../../src/proxy.rs#L235), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
+9. Configure and connect upstream TLS using the selected profile and verification policy. PolyTLS also applies an (in‑memory) upstream session cache keyed by `host:port`, so repeated connections may offer TLS resumption (`pre_shared_key`) ([`src/proxy.rs:242`](../../src/proxy.rs#L242), [`src/proxy.rs:250`](../../src/proxy.rs#L250), [`src/profile.rs:345`](../../src/profile.rs#L345)).
 10. Ensure the client and upstream negotiated compatible ALPN to avoid protocol confusion:
     - If client selected an ALPN protocol (e.g. `h2`), forces upstream connection to use ONLY that protocol.
     - If upstream negotiation fails or mismatches (rare due to constraint), the connection is aborted.
-    - If client had no ALPN, defaults upstream to `http/1.1`. ([`src/proxy.rs:241`](../../src/proxy.rs#L241)).
-    - If the client negotiated `h2` and the upstream profile enables ALPS for `h2`, PolyTLS configures the ALPS codepoint (if enabled) and adds the `application_settings` (ALPS) extension to the upstream handshake ([`src/proxy.rs`](../../src/proxy.rs#L279), [`src/profile.rs`](../../src/profile.rs#L329), [`src/profile.rs`](../../src/profile.rs#L358)).
-11. Relay application bytes until shutdown using `tokio::io::copy_bidirectional` ([`src/proxy.rs:259`](../../src/proxy.rs#L259)).
+    - If client had no ALPN, defaults upstream to `http/1.1`. ([`src/proxy.rs:265`](../../src/proxy.rs#L265)).
+    - If the client negotiated `h2` and the upstream profile enables ALPS for `h2`, PolyTLS configures the ALPS codepoint (if enabled) and adds the `application_settings` (ALPS) extension to the upstream handshake ([`src/proxy.rs:279`](../../src/proxy.rs#L279), [`src/profile.rs`](../../src/profile.rs#L329), [`src/profile.rs`](../../src/profile.rs#L358)).
+11. Relay application bytes until shutdown using `tokio::io::copy_bidirectional` ([`src/proxy.rs:323`](../../src/proxy.rs#L323)).
 
 ## Why `copy_bidirectional` works here
 After both TLS handshakes complete, `tokio_boring::accept` and `tokio_boring::connect` return streams implementing `AsyncRead + AsyncWrite` where reads/writes are *plaintext application bytes*. TLS record parsing, encryption, and re-framing happen inside each TLS stream, so the proxy can treat them as generic full‑duplex byte streams and just pump bytes in both directions.
