@@ -9,7 +9,7 @@ Docs: [docs/README.md](docs/README.md). Use this only on systems and traffic you
 
 ## Demo
 
-https://github.com/user-attachments/assets/bfcc8176-e02d-4f63-a709-6a2ce5af236a
+https://github.com/user-attachments/assets/3c2567d8-398a-4cdc-8307-54ef5b8873b2
 
 ![curl.png](docs/demo/curl.png)
 
