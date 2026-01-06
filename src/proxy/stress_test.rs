@@ -5,7 +5,7 @@ use rand::prelude::StdRng;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn stress_mitm_proxy() {
     // Run for a shorter duration by default to keep CI fast, but allow manual override
     let duration = if std::env::var("STRESS_TEST_LONG").is_ok() {
@@ -14,7 +14,11 @@ async fn stress_mitm_proxy() {
         Duration::from_secs(5)
     };
 
-    let concurrency = 50;
+    // For high values make sure you increase the limits of open file descriptors via `ulimit -n 100000`
+    let concurrency = std::env::var("STRESS_TEST_CONCURRENCY").map_or(50, |v| {
+        v.parse()
+            .expect("`STRESS_TEST_CONCURRENCY` should be a number")
+    });
 
     println!(
         "Starting stress test with concurrency {} for {:?}",
