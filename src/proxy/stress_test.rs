@@ -50,7 +50,6 @@ async fn stress_mitm_proxy() {
     let mut set = JoinSet::new();
 
     for i in 0..concurrency {
-        let proxy_addr = proxy_addr;
         let proxy_ca_cert_path = proxy_ca_cert_path.clone();
 
         set.spawn(async move {

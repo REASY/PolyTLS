@@ -521,7 +521,7 @@ mod tests {
             .expect("upstream connector should build");
 
         assert_eq!(connector.context().verify_mode(), SslVerifyMode::NONE);
-        assert_eq!(verification.effective_verify_hostname(), false);
+        assert!(!verification.effective_verify_hostname());
     }
 
     #[tokio::test]

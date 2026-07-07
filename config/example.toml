@@ -1,7 +1,9 @@
 # PolyTLS example config (TOML).
 
 [proxy]
+# Frontend protocol: "explicit" (HTTP CONNECT) or "socks5".
 mode = "explicit"
+# mode = "socks5"
 
 [proxy.listen]
 address = "127.0.0.1:8080"
@@ -12,8 +14,8 @@ enabled = true
 
 [proxy.upstream]
 # Default upstream TLS profile name used when the client does not provide
-# `X-PolyTLS-Upstream-Profile`.
-default_profile = "chrome-143-macos-arm64"
+# HTTP `X-PolyTLS-Upstream-Profile` or a SOCKS5 username profile.
+default_profile = "firefox-145-macos-arm64"
 # Optional: override the upstream target (currently unused).
 # default_upstream = "example.com:443"
 #
@@ -28,7 +30,8 @@ ca_key_path = "./ca/private.key"
 ca_cert_path = "./ca/certificate.pem"
 cache_ttl = 3600
 
-# Optional upstream TLS ClientHello profiles (selectable per CONNECT request via
-# `X-PolyTLS-Upstream-Profile: <profile-name>`).
+# Optional upstream TLS ClientHello profiles. In HTTP CONNECT mode, select one per
+# request with `X-PolyTLS-Upstream-Profile: <profile-name>`. In SOCKS5 mode, put
+# `<profile-name>` or `profile=<profile-name>` in the SOCKS5 username.
 [profiles."chrome-143-macos-arm64"]
 permute_extensions = true

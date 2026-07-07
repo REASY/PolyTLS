@@ -299,7 +299,7 @@ mod tests {
                                 continue;
                             }
 
-                            let mut out_buf: *mut boring_sys::CRYPTO_BUFFER = 1usize as *mut _;
+                            let mut out_buf: *mut boring_sys::CRYPTO_BUFFER = ptr::dangling_mut();
                             let rc = unsafe {
                                 raw_ssl_cert_decompress_zstd(
                                     ptr::null_mut(),

@@ -8,7 +8,9 @@ mod mitm;
 mod prefixed_stream;
 mod profile;
 mod proxy;
+mod socks5;
 mod telemetry;
+mod tls_client_hello;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -31,7 +33,7 @@ use crate::mitm::MitmState;
 use crate::profile::{
     DEFAULT_UPSTREAM_PROFILE, UpstreamProfile, UpstreamProfiles, UpstreamVerification,
 };
-use crate::proxy::ProxySettings;
+use crate::proxy::{ProxyProtocol, ProxySettings};
 use crate::telemetry::{init_meter_provider, init_otlp_logging};
 use boring::ssl::SslVersion;
 use std::collections::HashMap;
@@ -40,7 +42,7 @@ use std::collections::HashMap;
 #[command(
     name = "polytls",
     version,
-    about = "Explicit HTTP CONNECT proxy with optional TLS MITM (authorized use only)."
+    about = "HTTP CONNECT/SOCKS5 proxy with optional TLS MITM (authorized use only)."
 )]
 struct Args {
     /// Listen address for the explicit proxy (HTTP/1.1 CONNECT over plain TCP).
@@ -54,6 +56,10 @@ struct Args {
     /// Proxy mode.
     #[arg(long, value_enum)]
     mode: Option<ModeArg>,
+
+    /// Frontend proxy protocol.
+    #[arg(long, value_enum)]
+    proxy_protocol: Option<ProxyProtocolArg>,
 
     /// Root CA private key path (PEM, PKCS#8 recommended).
     #[arg(long, default_value = "./ca/private.key")]
@@ -86,6 +92,16 @@ enum ModeArg {
     Mitm,
 }
 
+#[derive(ValueEnum, Debug, Clone, Copy)]
+enum ProxyProtocolArg {
+    /// HTTP/1.1 CONNECT explicit proxy frontend.
+    Explicit,
+    /// HTTP/1.1 CONNECT explicit proxy frontend.
+    HttpConnect,
+    /// SOCKS5 CONNECT frontend.
+    Socks5,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ModeSelection {
     Passthrough,
@@ -116,16 +132,6 @@ async fn main() -> Result<()> {
     let listen_addr: SocketAddr = listen
         .parse()
         .map_err(|e| error::ErrorKind::Config(format!("invalid listen address: {e}")))?;
-
-    if let Some(cfg) = &file_config
-        && let Some(mode) = cfg.proxy.mode.as_deref()
-        && !mode.trim().eq_ignore_ascii_case("explicit")
-    {
-        return Err(error::ErrorKind::Config(format!(
-            "unsupported proxy.mode={mode} (only \"explicit\" is supported)"
-        ))
-        .into());
-    }
 
     let settings = init_proxy_settings(args, file_config).await?;
 
@@ -185,6 +191,14 @@ async fn read_config(args: &Args) -> Result<Option<Config>> {
 }
 
 async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<ProxySettings> {
+    let protocol = if let Some(protocol) = args.proxy_protocol {
+        proxy_protocol_from_arg(protocol)
+    } else if let Some(mode) = file_config.as_ref().and_then(|c| c.proxy.mode.as_deref()) {
+        parse_proxy_protocol(mode)?
+    } else {
+        ProxyProtocol::HttpConnect
+    };
+
     let mode = args
         .mode
         .map(|m| match m {
@@ -207,6 +221,7 @@ async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<
 
     let settings = match mode {
         ModeSelection::Passthrough => ProxySettings {
+            protocol,
             mode: proxy::ProxyMode::Passthrough,
         },
         ModeSelection::Mitm => {
@@ -280,6 +295,7 @@ async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<
                 .await?;
 
             ProxySettings {
+                protocol,
                 mode: proxy::ProxyMode::Mitm(MitmState {
                     ca: Arc::new(ca),
                     upstream_profiles,
@@ -291,15 +307,36 @@ async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<
     Ok(settings)
 }
 
+fn proxy_protocol_from_arg(arg: ProxyProtocolArg) -> ProxyProtocol {
+    match arg {
+        ProxyProtocolArg::Explicit | ProxyProtocolArg::HttpConnect => ProxyProtocol::HttpConnect,
+        ProxyProtocolArg::Socks5 => ProxyProtocol::Socks5,
+    }
+}
+
+fn parse_proxy_protocol(input: &str) -> Result<ProxyProtocol> {
+    let normalized = input.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "explicit" | "http-connect" | "http_connect" | "httpconnect" => {
+            Ok(ProxyProtocol::HttpConnect)
+        }
+        "socks5" | "socks" => Ok(ProxyProtocol::Socks5),
+        other => Err(error::ErrorKind::Config(format!(
+            "unsupported proxy.mode={other:?} (expected \"explicit\" or \"socks5\")"
+        ))
+        .into()),
+    }
+}
+
 fn init_default_profiles() -> HashMap<String, UpstreamProfile> {
     let mut profiles: HashMap<String, UpstreamProfile> = HashMap::new();
     let chrome_like = UpstreamProfile::default();
-    profiles.insert(DEFAULT_UPSTREAM_PROFILE.to_string(), chrome_like.clone());
     profiles.insert("chrome".to_string(), chrome_like.clone());
     profiles.insert("chrome-143-macos-x86_64".to_string(), chrome_like.clone());
     profiles.insert("chrome-143-macos-arm64".to_string(), chrome_like);
 
     let firefox = UpstreamProfile::firefox_145_macos_arm64();
+    profiles.insert(DEFAULT_UPSTREAM_PROFILE.to_string(), firefox.clone());
     profiles.insert("firefox".to_string(), firefox.clone());
     profiles.insert("firefox-145-macos-arm64".to_string(), firefox);
 
@@ -438,6 +475,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_proxy_protocol_accepts_explicit_and_socks5() {
+        assert!(matches!(
+            parse_proxy_protocol("explicit").unwrap(),
+            ProxyProtocol::HttpConnect
+        ));
+        assert!(matches!(
+            parse_proxy_protocol("http-connect").unwrap(),
+            ProxyProtocol::HttpConnect
+        ));
+        assert!(matches!(
+            parse_proxy_protocol("socks5").unwrap(),
+            ProxyProtocol::Socks5
+        ));
+    }
+
+    #[test]
     fn apply_upstream_profile_config_overrides_selected_fields() {
         let base = UpstreamProfile::chrome_143_macos_arm64();
         let cfg = config::UpstreamProfileConfig {
@@ -497,13 +550,12 @@ mod tests {
         let default_profile = profiles
             .get(DEFAULT_UPSTREAM_PROFILE)
             .expect("default profile");
-        let chrome_profile = profiles.get("chrome").expect("chrome profile");
+        let firefox_profile = profiles.get("firefox").expect("firefox profile");
         assert_eq!(
-            default_profile.grease, chrome_profile.grease,
-            "chrome alias should match the default chrome-like profile"
+            default_profile.cert_compression, firefox_profile.cert_compression,
+            "default alias should match the Firefox profile"
         );
 
-        let firefox_profile = profiles.get("firefox").expect("firefox profile");
         assert!(
             firefox_profile
                 .cert_compression
@@ -539,6 +591,7 @@ address = "127.0.0.1:8080"
             listen: None,
             config: Some(path),
             mode: None,
+            proxy_protocol: None,
             ca_key_path: PathBuf::from("ca.key"),
             ca_cert_path: PathBuf::from("ca.crt"),
             leaf_ttl_secs: 3600,
@@ -566,6 +619,7 @@ address = "127.0.0.1:8080"
             listen: None,
             config: Some(path),
             mode: None,
+            proxy_protocol: None,
             ca_key_path: PathBuf::from("ca.key"),
             ca_cert_path: PathBuf::from("ca.crt"),
             leaf_ttl_secs: 3600,

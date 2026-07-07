@@ -3,7 +3,7 @@
 ## 1. Project Overview
 
 ### 1.1 Purpose
-An explicit HTTP proxy (HTTP/1.1 `CONNECT`) with two data-plane modes:
+An explicit proxy with HTTP/1.1 `CONNECT` and SOCKS5 `CONNECT` frontends, with two data-plane modes:
 
 - **Passthrough**: tunnels bytes end-to-end (client TLS terminates on the origin).
 - **MITM**: terminates client TLS on the proxy and originates a new proxy→upstream TLS connection, with configurable outbound (proxy→upstream) ClientHello parameters (“upstream profiles”).
@@ -23,12 +23,12 @@ Many upstream services behave differently depending on TLS handshake details (ci
 - **Must** support dynamic certificate generation and management
 - **Must** use BoringSSL (not rustls or OpenSSL) for ClientHello customization capabilities
 - **Must** maintain full bidirectional traffic flow with minimal latency
-- **MVP**: explicit proxy only (HTTP/1.1 `CONNECT`), no transparent/TProxy mode
+- **MVP**: explicit proxy only (HTTP/1.1 `CONNECT` or SOCKS5 `CONNECT`), no transparent/TProxy mode
 - **Current**: L4 byte-relay (no L7 HTTP/2 translation/framing parsing); ALPN is profile-driven (Chrome/Firefox/Safari profiles advertise `h2`, default profile is `http/1.1`).
 - **Future**: Full L7 HTTP/2 support (H2 frame model, SETTINGS fingerprinting, HPACK behavior, pseudo-header ordering, priority/prioritization).
 
 ### 1.4 OSI Scope & Fingerprinting Limits (Important)
-This system is primarily a Layer 7 proxy (HTTP `CONNECT`) that performs Layer 6 TLS bridging. It will **inevitably change** characteristics outside of TLS, including:
+This system is primarily an explicit proxy (HTTP `CONNECT` or SOCKS5 `CONNECT`) that performs Layer 6 TLS bridging. It will **inevitably change** characteristics outside of TLS, including:
 - **Layer 4 (TCP) fingerprinting**: upstream SYN/SYN-ACK options, MSS, window scaling, initial congestion window behavior, pacing, etc. come from the proxy host/kernel, not the original client.
 - **Layer 3 (IP) attributes**: source IP, TTL/hop-limit, path MTU discovery behavior, and routing are those of the proxy.
 
@@ -40,7 +40,7 @@ If your evaluation target correlates **TLS + TCP + HTTP** fingerprints, this pro
 ```
 MITM mode (terminates client TLS):
 
-┌─────────┐  HTTP/1.1 CONNECT + TLS1 (terminated)  ┌─────────────┐   TLS2 (originated)    ┌──────────────┐
+┌─────────┐  CONNECT + TLS1 (terminated)           ┌─────────────┐   TLS2 (originated)    ┌──────────────┐
 │ Client  │ ──────────────────────────────────────►│ MITM Proxy  │ ────────────────────►  │ Target Server│
 │         │ ◄──────────────────────────────────────│             │ ◄────────────────────  │              │
 └─────────┘            Decrypted / Relayed         └─────────────┘     Decrypted / Relayed└──────────────┘
@@ -54,7 +54,7 @@ MITM mode (terminates client TLS):
 
 Passthrough mode (tunnels TLS end-to-end):
 
-┌─────────┐  HTTP/1.1 CONNECT + TLS (tunneled)  ┌─────────────┐   TCP relay         ┌──────────────┐
+┌─────────┐  CONNECT + TLS (tunneled)           ┌─────────────┐   TCP relay         ┌──────────────┐
 │ Client  │ ───────────────────────────────────►│ Proxy       │ ─────────────►      │ Target Server│
 │         │ ◄───────────────────────────────────│             │ ◄────────────       │              │
 └─────────┘          Encrypted / Relayed        └─────────────┘  Encrypted / Relayed└──────────────┘
@@ -62,23 +62,24 @@ Passthrough mode (tunnels TLS end-to-end):
 
 ### 2.2 Components
 
-#### 2.2.1 Explicit Proxy Frontend (HTTP/1.1 CONNECT)
-- Listens on a plain TCP port and implements HTTP/1.1 proxy semantics for `CONNECT host:port`
+#### 2.2.1 Explicit Proxy Frontends
+- Listens on a plain TCP port and implements HTTP/1.1 proxy semantics for `CONNECT host:port`, or SOCKS5 greeting/auth plus `CONNECT`
 - Enforces request limits: max request bytes (16KiB) + max header count (64) ([`src/http_connect.rs`](../../src/http_connect.rs#L5))
 - Enforces an upstream TCP connect timeout (30s) ([`src/proxy.rs`](../../src/proxy.rs#L12))
-- Defines upstream target selection policy: `CONNECT` authority is the upstream destination; SNI mismatch is fail-closed in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L184), [`src/mitm.rs`](../../src/mitm.rs#L66))
+- Defines upstream target selection policy: HTTP `CONNECT` authority or SOCKS5 destination address is the upstream TCP destination; SNI mismatch is fail-closed in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L184), [`src/mitm.rs`](../../src/mitm.rs#L66))
+- In SOCKS5 MITM mode, the username may select the upstream profile. Domain targets use the SOCKS5 domain as the TLS identity. IP targets require ClientHello SNI; PolyTLS fails closed when SNI is missing.
 
 #### 2.2.2 Certificate Authority (CA) Manager
 - Loads an existing root CA from disk or generates a new RSA-2048 root CA on first run ([`src/ca.rs`](../../src/ca.rs#L40))
-- Mints per-host RSA leaf certificates (CN+SAN=`host`) on demand for MITM mode ([`src/ca.rs`](../../src/ca.rs#L91))
+- Mints per-host RSA leaf certificates (CN+SAN=`host`) on demand for the client-facing TLS identity name in MITM mode ([`src/ca.rs`](../../src/ca.rs#L91))
 - Caches leaf certs in memory with a TTL ([`src/ca.rs`](../../src/ca.rs#L91))
 
 #### 2.2.3 TLS Termination Endpoint
 - Accepts incoming client TLS connections
 - Presents dynamically generated leaf certificates to clients in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L213))
-- Enforces `SNI == CONNECT host` as a fail-closed policy (after handshake completion) ([`src/proxy.rs`](../../src/proxy.rs#L220), [`src/mitm.rs`](../../src/mitm.rs#L66))
+- Enforces `SNI == expected TLS identity name` as a fail-closed policy (after handshake completion) ([`src/proxy.rs`](../../src/proxy.rs#L220), [`src/mitm.rs`](../../src/mitm.rs#L66))
 
-**Note on SNI timing**: SNI is carried in the client `ClientHello` and is available during the handshake (and can be queried after handshake completion). However, certificate selection must occur **before** the server sends `ServerHello`. For the MVP, use the `CONNECT host:port` authority as the certificate name source-of-truth (then optionally enforce `SNI == CONNECT host` as a fail-closed policy).
+**Note on SNI timing**: SNI is carried in the client `ClientHello` and is available during the handshake (and can be queried after handshake completion). However, certificate selection must occur **before** the server sends `ServerHello`. HTTP `CONNECT` and SOCKS5 domain targets already provide a DNS identity before TLS starts. SOCKS5 IP targets do not, so PolyTLS peeks the ClientHello before TLS accept and uses SNI as the certificate name and upstream TLS name; if SNI is absent, the connection fails closed.
 
 #### 2.2.4 TLS Origination Endpoint
 - Establishes new TLS connections to upstream servers
@@ -88,7 +89,7 @@ Passthrough mode (tunnels TLS end-to-end):
 #### 2.2.5 Configuration Manager
 - Loads a TOML config file into [`Config`](../../src/config.rs#L4) (TOML-only; `.yaml` is not supported)
 - Provides built-in upstream profiles (`chrome`, `firefox`, `safari`) and optional per-profile overrides from config ([`src/main.rs`](../../src/main.rs#L294), [`src/profile.rs`](../../src/profile.rs#L60))
-- Selects upstream profile per request via `X-PolyTLS-Upstream-Profile` header on `CONNECT` ([`src/http_connect.rs`](../../src/http_connect.rs#L7), [`src/proxy.rs`](../../src/proxy.rs#L157))
+- Selects upstream profile per request via `X-PolyTLS-Upstream-Profile` on HTTP `CONNECT`, or via the SOCKS5 username ([`src/http_connect.rs`](../../src/http_connect.rs#L7), [`src/socks5.rs`](../../src/socks5.rs))
 - Does not implement hot reload (future)
 
 #### 2.2.6 Traffic Relay
@@ -100,8 +101,12 @@ Passthrough mode (tunnels TLS end-to-end):
 
 ### 3.0 Proxy Mode Requirements (MVP: Explicit CONNECT)
 - [x] Accept HTTP/1.1 `CONNECT host:port` and reply `200 Connection Established` before starting TLS termination in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L201))
+- [x] Accept SOCKS5 `CONNECT` and reply success before starting TLS termination in MITM mode
+- [x] Select SOCKS5 per-request upstream profile from username (`<profile-name>` or `profile=<profile-name>`)
+- [x] Fail closed for SOCKS5 IP targets when ClientHello SNI is absent
+- [x] For SOCKS5 IP targets with ClientHello SNI, use SNI as the client-facing certificate name and upstream TLS name while dialing the SOCKS5 IP target
 - [x] Reject non-`CONNECT` methods with a clear HTTP error (`405 Method Not Allowed`) ([`src/http_connect.rs`](../../src/http_connect.rs#L70), [`src/proxy.rs`](../../src/proxy.rs#L279))
-- [x] Upstream target selection: use `CONNECT` authority as the upstream destination; enforce SNI mismatch as a policy violation in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L184), [`src/proxy.rs`](../../src/proxy.rs#L220))
+- [x] Upstream target selection: use HTTP `CONNECT` authority or SOCKS5 destination as the upstream TCP destination; enforce SNI mismatch as a policy violation in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L184), [`src/proxy.rs`](../../src/proxy.rs#L220))
 - [x] Enforce request limits: max request bytes (16KiB) + max header count (64) ([`src/http_connect.rs`](../../src/http_connect.rs#L5))
 - [x] Enforce upstream TCP connect timeout (30s) ([`src/proxy.rs`](../../src/proxy.rs#L12))
 - [ ] Idle timeouts for established tunnels (not implemented)
@@ -142,7 +147,7 @@ Passthrough mode (tunnels TLS end-to-end):
 - [ ] Persist to disk with password protection / encrypted private key (not implemented; key is stored as unencrypted PKCS#8 PEM, chmod 0600 on Unix) ([`src/ca.rs`](../../src/ca.rs#L69))
 
 #### 3.2.2 Leaf Certificate Generation
-- [x] Generate certificates on-demand for each requested domain (`CONNECT` host), and present CN+SAN=`host` ([`src/ca.rs`](../../src/ca.rs#L91))
+- [x] Generate certificates on-demand for each client-facing TLS identity name, and present CN+SAN=`host` ([`src/ca.rs`](../../src/ca.rs#L91))
 - [x] Implement leaf certificate caching with TTL (in-memory) ([`src/ca.rs`](../../src/ca.rs#L91))
 - [ ] Multi-domain (multi-SAN) certificates (not implemented)
 - [ ] OCSP response generation (not implemented)
@@ -193,7 +198,7 @@ BoringSSL exposes fewer knobs than "raw ClientHello crafting". For an MVP, focus
 #### 4.2.1 Profile-Based Configuration
 ```toml
 [profiles.default]
-# Defaults are Chrome-like. You can override specific knobs below.
+# Defaults are Firefox-like. You can override specific knobs below.
 permute_extensions = true
 
 [profiles."chrome-143-macos-arm64"]
@@ -234,10 +239,10 @@ address = "127.0.0.1:8080" # Safe default: do not expose an unauthenticated prox
 backlog = 1024
 
 [proxy.upstream]
-# MVP: use CONNECT authority (host:port). Optional override for lab use-cases.
+# Optional override for lab use-cases (currently unused).
 # default_upstream = "example.com:443"
 # Default TLS profile name when the client does not provide a per-request override.
-default_profile = "default"
+default_profile = "firefox-145-macos-arm64"
 # Additional PEM trust bundle for proxy→upstream TLS verification (optional).
 # ca_file = "./path/to/upstream-ca.pem"
 # Lab-only: disable upstream certificate verification (like curl -k).
@@ -253,6 +258,7 @@ cache_ttl = 3600 # seconds
 
 Per-request profile selection:
 - The client may include `X-PolyTLS-Upstream-Profile: <profile-name>` in the HTTP CONNECT request ([`src/http_connect.rs`](../../src/http_connect.rs#L7)).
+- SOCKS5 clients may put `<profile-name>` or `profile=<profile-name>` in the username field.
 
 Implementation notes:
 - Config file format is TOML only (enforced by [`read_config`](../../src/main.rs#L152)); see [`config/example.toml`](../../config/example.toml#L1).
@@ -286,15 +292,17 @@ struct ProxyControl {
 
 The data plane is implemented as a per-connection async task that performs:
 
-1. Parse `CONNECT` (and optionally extract `X-PolyTLS-Upstream-Profile`) via [`read_connect_request`](../../src/http_connect.rs#L36).
+1. Parse HTTP `CONNECT` (and optionally extract `X-PolyTLS-Upstream-Profile`) via [`read_connect_request`](../../src/http_connect.rs#L36), or parse SOCKS5 `CONNECT` via [`src/socks5.rs`](../../src/socks5.rs).
 2. Establish an upstream TCP connection with a timeout ([`src/proxy.rs`](../../src/proxy.rs#L115)).
-3. Reply `HTTP/1.1 200 Connection Established` ([`src/proxy.rs`](../../src/proxy.rs#L272)).
+3. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([`src/proxy.rs`](../../src/proxy.rs#L272), [`src/socks5.rs`](../../src/socks5.rs)).
 4. Relay bytes bidirectionally using `tokio::io::copy_bidirectional` ([`src/proxy.rs`](../../src/proxy.rs#L134), [`src/proxy.rs`](../../src/proxy.rs#L259)).
 
 Two modes differ only in what is relayed:
 
 - **Passthrough**: raw `TcpStream` ↔ `TcpStream`, with `PrefixedStream` used to re-inject any bytes already read past the end of the CONNECT headers ([`src/prefixed_stream.rs`](../../src/prefixed_stream.rs#L5)).
 - **MITM**: `tokio_boring::SslStream` ↔ `tokio_boring::SslStream` (TLS terminated on the proxy, then re-originated upstream), with SNI mismatch enforcement and ALPN compatibility enforcement (ALPN must match when present; if upstream omits ALPN, treat it as compatible with `http/1.1`) ([`src/proxy.rs`](../../src/proxy.rs#L213), [`src/proxy.rs`](../../src/proxy.rs#L237)).
+
+For SOCKS5 MITM, domain targets are the common browser path. `curl --socks5-hostname` also sends a domain target. `curl --socks5` resolves locally and sends an IP target, while the URL/SNI/HTTP host can remain the DNS name; this is the path that exercises ClientHello pre-peeking. Directly opening `https://<ip>/...` in a browser is not equivalent because the URL host, TLS SNI, certificate validation name, and HTTP `Host`/HTTP/2 `:authority` all become the IP address.
 
 The current code does not model a persistent `ProxyConnection` struct or store per-connection metadata beyond logs.
 
@@ -370,6 +378,12 @@ $ curl --cacert ./ca/certificate.pem -v -x http://127.0.0.1:8080 https://example
 
 # Per-request upstream profile selection (CONNECT header)
 $ curl --proxy-header "X-PolyTLS-Upstream-Profile: safari" --cacert ./ca/certificate.pem -v -x http://127.0.0.1:8080 https://example.com/
+
+# SOCKS5 domain target (typical browser-shaped SOCKS5 request)
+$ curl -vk --socks5-hostname 127.0.0.1:1080 --proxy-user "profile=firefox-145-macos-arm64:" https://example.com/
+
+# SOCKS5 IP target while retaining URL/SNI/HTTP host as the DNS name
+$ curl -vk --socks5 127.0.0.1:1080 --proxy-user "profile=firefox-145-macos-arm64:" https://example.com/
 
 # OpenSSL via proxy (if supported by your OpenSSL build)
 $ openssl s_client -proxy 127.0.0.1:8080 -connect example.com:443 -servername example.com </dev/null | grep -A 1 "Cipher"

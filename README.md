@@ -1,6 +1,6 @@
 # PolyTLS
 
-An **explicit** HTTP/1.1 `CONNECT` proxy that can run in:
+An HTTP/1.1 `CONNECT` or SOCKS5 `CONNECT` proxy that can run in:
 
 - **Passthrough mode**: tunnels bytes (no TLS termination).
 - **MITM mode**: terminates client TLS and originates a new upstream TLS connection using **BoringSSL** via `boring` + `tokio-boring`.
@@ -15,7 +15,7 @@ https://github.com/user-attachments/assets/3c2567d8-398a-4cdc-8307-54ef5b8873b2
 
 ## Architecture
 
-PolyTLS is an **explicit** HTTP/1.1 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile"). 
+PolyTLS accepts HTTP/1.1 `CONNECT` by default and can also run as a SOCKS5 `CONNECT` proxy. In passthrough mode it just tunnels bytes. In MITM mode it terminates client TLS and opens a new upstream TLS connection (optionally using a per-request "upstream profile").
 It supports tunneling **HTTP/2** (via ALPN negotiation) by enforcing protocol consistency between the client and upstream connections – after TLS we relay bytes; HTTP/1.1 vs HTTP/2 is purely **ALPN + byte relay**.
 
 ```ascii
@@ -47,9 +47,9 @@ See the full step-by-step flow (including the `PrefixedStream` "leftover bytes" 
 
 ### MITM flow (TL;DR)
 
-1. Parse `CONNECT` (+ optional `X-PolyTLS-Upstream-Profile`).
-2. Reply `200 Connection Established`.
-3. Load/generate Root CA → mint leaf cert for `host`.
+1. Parse HTTP `CONNECT` or SOCKS5 `CONNECT` (+ optional upstream profile selection).
+2. Reply `200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5.
+3. Load/generate Root CA → mint a leaf cert for the TLS identity name.
 4. TLS-accept client using minted cert.
 5. TLS-connect upstream (default profile or selected profile).
 6. Enforce ALPN compatibility.
@@ -116,6 +116,24 @@ For a quick smoke test without installing the CA (not recommended for real testi
 curl -vk -x http://127.0.0.1:8080 https://example.com/
 ```
 
+### SOCKS5 frontend
+
+SOCKS5 can be used in passthrough or MITM mode:
+
+```bash
+cargo run -- --proxy-protocol socks5 --mode mitm --listen 127.0.0.1:1080
+curl -vk --socks5-hostname 127.0.0.1:1080 https://example.com/
+```
+
+In MITM mode, a SOCKS5 request can carry either a domain target or an IP target:
+
+- Domain target, for example `curl --socks5-hostname` or typical browser SOCKS5 traffic: PolyTLS uses the SOCKS5 domain as the client-facing certificate name and upstream TLS name, then verifies the client's ClientHello SNI matches it.
+- IP target, for example `curl --socks5`: PolyTLS peeks the ClientHello before TLS termination. If SNI is present, it uses that SNI for the client-facing certificate and upstream TLS name while still dialing the SOCKS5 IP target. If SNI is missing, PolyTLS fails closed.
+
+Chrome/Chromium SOCKS5 traffic normally follows the domain-target path for HTTPS URLs. `curl --socks5` is useful when you specifically need to test the IP-target/SNI recovery path.
+
+Opening `https://<ip>/...` in a browser is not equivalent to the IP-target/SNI path above: the URL host, TLS SNI, certificate validation name, and HTTP `Host`/HTTP/2 `:authority` all become the IP address.
+
 ### Testing self-signed upstream servers (lab)
 
 If the **upstream** TLS server uses a self-signed certificate or private CA, either add that CA to the proxy:
@@ -132,10 +150,28 @@ cargo run -- --config config/example.toml --upstream-insecure-skip-verify
 
 ### Selecting an upstream TLS profile per request
 
-In MITM mode, you can select which upstream TLS profile the proxy uses by adding a header to the HTTP `CONNECT` request:
+In HTTP `CONNECT` MITM mode, you can select which upstream TLS profile the proxy uses by adding a header to the `CONNECT` request:
 
 ```bash
 curl --proxy-header 'X-PolyTLS-Upstream-Profile: chrome-143-macos-arm64' -x http://127.0.0.1:8080 https://example.com/
+```
+
+In SOCKS5 MITM mode, put the profile in the SOCKS5 username. Both raw profile names and `profile=<name>` are accepted:
+
+```bash
+curl -vk \
+  --socks5-hostname 127.0.0.1:1080 \
+  --proxy-user 'profile=firefox-145-macos-arm64:' \
+  https://example.com/
+```
+
+To exercise the SOCKS5 IP-target path with curl while keeping the URL/SNI/HTTP host as the DNS name, use `--socks5` instead:
+
+```bash
+curl -vk \
+  --socks5 127.0.0.1:1080 \
+  --proxy-user 'profile=firefox-145-macos-arm64:' \
+  https://example.com/
 ```
 
 Other built-in profiles:

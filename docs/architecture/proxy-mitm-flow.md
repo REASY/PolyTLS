@@ -1,11 +1,13 @@
-# MITM CONNECT flow (`handle_mitm`)
+# MITM CONNECT flow
 
-Primary implementation: [`src/proxy.rs:148`](../../src/proxy.rs#L148).
+Primary implementation: [`src/proxy.rs`](../../src/proxy.rs).
 
 ## Data path overview
-- Client → proxy: HTTP/1.1 `CONNECT`, then TLS is terminated by the proxy.
+- Client → proxy: HTTP/1.1 `CONNECT` or SOCKS5 `CONNECT`, then TLS is terminated by the proxy.
 - Proxy → upstream: a new TCP connection, then a new upstream TLS session is originated by the proxy.
 - Proxy relays decrypted application bytes between the two TLS sessions.
+- HTTP `CONNECT` selects per-request profiles with `X-PolyTLS-Upstream-Profile`.
+- SOCKS5 selects per-request profiles with the username field, either `<profile-name>` or `profile=<profile-name>`.
 
 ## Diagram
 
@@ -22,15 +24,19 @@ Diagram source: [mitm-context.puml](../diagrams/c4/mitm-context.puml).
 Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
 
 ## Step-by-step
-1. Read and parse the client's `CONNECT host:port` request; keep any bytes read past `\r\n\r\n` as `connect.leftover` ([`src/proxy.rs:164`](../../src/proxy.rs#L164), [`src/http_connect.rs:36`](../../src/http_connect.rs#L36)).
+1. Read and parse the client's frontend request:
+   - HTTP `CONNECT host:port`; keep any bytes read past `\r\n\r\n` as `connect.leftover` ([`src/http_connect.rs`](../../src/http_connect.rs)).
+   - SOCKS5 greeting/auth plus `CONNECT`; profile selection comes from username/password auth ([`src/socks5.rs`](../../src/socks5.rs)).
    - Optional: extract `X-PolyTLS-Upstream-Profile` to select an upstream TLS profile ([`src/http_connect.rs:7`](../../src/http_connect.rs#L7), [`src/http_connect.rs:92`](../../src/http_connect.rs#L92)).
 2. Select the upstream TLS profile and fetch/build a cached `SslConnector` (unknown profile → `400`, other failures → `502`) ([`src/proxy.rs:175`](../../src/proxy.rs#L175), [`src/profile.rs:158`](../../src/profile.rs#L158)).
-3. Dial upstream TCP with a timeout; send `502`/`504` on connect/timeout failures ([`src/proxy.rs:200`](../../src/proxy.rs#L200)).
-4. Reply `HTTP/1.1 200 Connection Established` ([`src/proxy.rs:216`](../../src/proxy.rs#L216)).
+3. Dial upstream TCP with a timeout; send `502`/`504` or SOCKS5 failure on connect/timeout failures ([`src/proxy.rs:200`](../../src/proxy.rs#L200)).
+4. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([`src/proxy.rs:216`](../../src/proxy.rs#L216), [`src/socks5.rs`](../../src/socks5.rs)).
 5. Load the selected `UpstreamProfile` (mainly for the ALPN list used on the client-facing TLS acceptor) ([`src/proxy.rs:220`](../../src/proxy.rs#L220), [`src/profile.rs:154`](../../src/profile.rs#L154)).
 6. Wrap the client socket in `PrefixedStream(connect.leftover, client)` so the next stage sees a contiguous stream ([`src/proxy.rs:227`](../../src/proxy.rs#L227), [`src/prefixed_stream.rs:1`](../../src/prefixed_stream.rs#L1)).
-7. Mint a per-host leaf certificate from the MITM CA, build a TLS server acceptor, then complete the TLS handshake with the client ([`src/proxy.rs:228`](../../src/proxy.rs#L228), [`src/ca.rs:91`](../../src/ca.rs#L91), [`src/mitm.rs:16`](../../src/mitm.rs#L16)).
-8. Validate that the client's SNI matches the CONNECT host ([`src/proxy.rs:235`](../../src/proxy.rs#L235), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
+7. Determine the client-facing TLS identity name, mint a matching leaf certificate from the MITM CA, build a TLS server acceptor, then complete the TLS handshake with the client ([`src/proxy.rs:228`](../../src/proxy.rs#L228), [`src/ca.rs:91`](../../src/ca.rs#L91), [`src/mitm.rs:16`](../../src/mitm.rs#L16)).
+8. Validate that the client's SNI matches the expected TLS identity name ([`src/proxy.rs:235`](../../src/proxy.rs#L235), [`src/mitm.rs:66`](../../src/mitm.rs#L66)).
+   - HTTP `CONNECT` and SOCKS5 domain targets use the requested host/domain as the certificate name, upstream TLS name, and SNI validation name.
+   - For SOCKS5 IP targets, PolyTLS peeks the ClientHello before TLS accept. If SNI is present, it uses that name for the client-facing certificate and upstream TLS name while still dialing the SOCKS5 IP target. If SNI is missing, PolyTLS fails closed.
 9. Configure and connect upstream TLS using the selected profile and verification policy. PolyTLS also applies an (in‑memory) upstream session cache keyed by `host:port`, so repeated connections may offer TLS resumption (`pre_shared_key`) ([`src/proxy.rs:242`](../../src/proxy.rs#L242), [`src/proxy.rs:250`](../../src/proxy.rs#L250), [`src/profile.rs:345`](../../src/profile.rs#L345)).
 10. Ensure the client and upstream negotiated compatible ALPN to avoid protocol confusion:
     - If client selected an ALPN protocol (e.g. `h2`), forces upstream connection to use ONLY that protocol.
@@ -52,7 +58,7 @@ In MITM mode, the proxy is a TLS server *from the client's perspective*. That me
 
 The proxy does not have the upstream server's private key, so it cannot legitimately present the upstream's real certificate. Instead, `CaManager` ([`src/ca.rs`](../../src/ca.rs)) acts as a local CA:
 - It loads or creates the proxy's **Root CA** keypair and certificate (default: [`ca/private.key`](../../ca/private.key) and [`ca/certificate.pem`](../../ca/certificate.pem)).
-- For each CONNECT host it "mints" a per-host **leaf certificate** (end-entity/server certificate) signed by that Root CA ([`CaManager::leaf_for_host`](../../src/ca.rs#L91)), and uses that leaf cert+key to accept the client's TLS handshake.
+- For each client-facing TLS identity name it "mints" a per-host **leaf certificate** (end-entity/server certificate) signed by that Root CA ([`CaManager::leaf_for_host`](../../src/ca.rs#L91)), and uses that leaf cert+key to accept the client's TLS handshake.
 
 **Leaf certificate**: the server/end-entity certificate at the bottom of a certificate chain (Root CA → leaf). It's the certificate the proxy presents to the client for a specific host.
 
@@ -61,13 +67,18 @@ The proxy does not have the upstream server's private key, so it cannot legitima
 - **Proxy → upstream (upstream TLS)**: this is a separate verification path inside the proxy. Client-side insecure flags do not affect it. For lab/private-CA upstreams, configure the proxy with `proxy.upstream.ca_file` (preferred) or disable upstream verification (`proxy.upstream.insecure_skip_verify`, lab only).
 
 ## Per-request upstream TLS profiles
-The proxy can select the upstream TLS ClientHello profile per CONNECT request using an optional header:
+The proxy can select the upstream TLS ClientHello profile per CONNECT request:
 
-- Header: `X-PolyTLS-Upstream-Profile: <profile-name>`
-- Curl example (adds a header to the CONNECT request):
+- HTTP header: `X-PolyTLS-Upstream-Profile: <profile-name>`
+- SOCKS5 username: `<profile-name>` or `profile=<profile-name>`
+- HTTP curl example (adds a header to the CONNECT request):
   - `curl --proxy-header 'X-PolyTLS-Upstream-Profile: chrome-143-macos-arm64' --insecure -x http://127.0.0.1:8080 https://example.com/`
+- SOCKS5 curl example:
+  - `curl --socks5-hostname 127.0.0.1:1080 --proxy-user 'profile=chrome-143-macos-arm64:' --insecure https://example.com/`
 
-Profiles are configured in TOML under the `[profiles]` table ([`src/config.rs:7`](../../src/config.rs#L7)). If the header is not present, the proxy uses `proxy.upstream.default_profile` ([`src/config.rs:44`](../../src/config.rs#L44)).
+For SOCKS5, `curl --socks5-hostname` sends a domain target to the proxy. `curl --socks5` resolves locally and sends an IP target; PolyTLS then depends on ClientHello SNI to recover the TLS identity name. Navigating directly to `https://<ip>/...` is not equivalent, because the browser also changes the TLS SNI and HTTP `Host`/HTTP/2 `:authority` identity to the IP.
+
+Profiles are configured in TOML under the `[profiles]` table ([`src/config.rs:7`](../../src/config.rs#L7)). If the request does not select a profile, the proxy uses `proxy.upstream.default_profile` ([`src/config.rs:44`](../../src/config.rs#L44)).
 
 ## Why Chrome/Chromium profile is the highest fidelity
 PolyTLS originates upstream TLS using BoringSSL (via the Rust `boring` crate) ([`src/profile.rs`](../../src/profile.rs)). Chromium-based browsers also use BoringSSL, so the `chrome-*` upstream profile is largely configuring the *same* TLS stack that real Chrome uses. In practice this makes Chrome/Chromium the easiest profile to get close to for JA3/JA4, while Firefox (NSS) and Safari (Apple TLS) can only be approximated within BoringSSL’s feature set.

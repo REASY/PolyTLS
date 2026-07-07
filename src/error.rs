@@ -3,6 +3,7 @@ use std::io;
 use thiserror::Error;
 
 use crate::http_connect::ConnectError;
+use crate::socks5::SocksError;
 
 pub type Result<T> = std::result::Result<T, PolyTlsError>;
 
@@ -34,6 +35,9 @@ pub enum ErrorKind {
 
     #[error("CONNECT error: {0}")]
     Connect(#[from] ConnectError),
+
+    #[error("SOCKS5 error: {0}")]
+    Socks5(#[from] SocksError),
 
     #[error("BoringSSL error: {0}")]
     Boring(#[from] boring::error::ErrorStack),

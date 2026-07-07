@@ -490,6 +490,17 @@ impl TestClient {
         open_connect_tunnel(self.proxy_addr, authority, extra_headers).await
     }
 
+    pub async fn connect_socks5_tunnel(
+        &self,
+        host: &str,
+        port: u16,
+        username: Option<&str>,
+    ) -> TcpStream {
+        open_socks5_tunnel(self.proxy_addr, host, port, username)
+            .await
+            .expect("SOCKS5 tunnel should be established")
+    }
+
     pub async fn connect_tls(
         &self,
         host: &str,
@@ -562,7 +573,28 @@ impl TestContext {
         Self::from_origin(origin, origin_ca).await
     }
 
+    pub async fn new_socks5_mitm(origin_body: &str) -> Self {
+        let origin_ca = TestCa::new("e2e-origin-ca").await;
+        let origin = TestTlsOrigin::spawn_http(
+            "localhost",
+            &origin_ca,
+            vec!["h2".to_string(), "http/1.1".to_string()],
+            origin_body,
+        )
+        .await;
+
+        Self::from_origin_with_protocol(origin, origin_ca, ProxyProtocol::Socks5).await
+    }
+
     pub async fn from_origin(origin: TestTlsOrigin, origin_ca: TestCa) -> Self {
+        Self::from_origin_with_protocol(origin, origin_ca, ProxyProtocol::HttpConnect).await
+    }
+
+    async fn from_origin_with_protocol(
+        origin: TestTlsOrigin,
+        origin_ca: TestCa,
+        protocol: ProxyProtocol,
+    ) -> Self {
         use crate::mitm::MitmState;
         use crate::profile::{UpstreamProfiles, UpstreamVerification};
 
@@ -584,6 +616,7 @@ impl TestContext {
             .expect("default connector should build");
 
         let proxy = TestProxy::spawn(ProxySettings {
+            protocol,
             mode: ProxyMode::Mitm(MitmState {
                 ca: proxy_ca.manager.clone(),
                 upstream_profiles,
@@ -619,6 +652,7 @@ impl TestContext {
         .await;
 
         let proxy = TestProxy::spawn(ProxySettings {
+            protocol: ProxyProtocol::HttpConnect,
             mode: ProxyMode::Passthrough,
         })
         .await;
@@ -702,6 +736,112 @@ async fn open_connect_tunnel(
     );
 
     stream
+}
+
+async fn open_socks5_tunnel(
+    proxy_addr: SocketAddr,
+    host: &str,
+    port: u16,
+    username: Option<&str>,
+) -> std::result::Result<TcpStream, u8> {
+    let mut stream = TcpStream::connect(proxy_addr)
+        .await
+        .expect("client should connect to proxy");
+
+    let method = if username.is_some() { 0x02 } else { 0x00 };
+    stream
+        .write_all(&[0x05, 0x01, method])
+        .await
+        .expect("SOCKS5 greeting should be written");
+
+    let mut method_resp = [0u8; 2];
+    stream
+        .read_exact(&mut method_resp)
+        .await
+        .expect("SOCKS5 method response should be read");
+    assert_eq!(method_resp[0], 0x05, "SOCKS5 response version");
+    assert_eq!(method_resp[1], method, "SOCKS5 selected auth method");
+
+    if let Some(username) = username {
+        let username = username.as_bytes();
+        assert!(username.len() <= u8::MAX as usize, "username too long");
+        let mut auth = Vec::with_capacity(username.len() + 3);
+        auth.push(0x01);
+        auth.push(username.len() as u8);
+        auth.extend_from_slice(username);
+        auth.push(0);
+        stream
+            .write_all(&auth)
+            .await
+            .expect("SOCKS5 username auth should be written");
+
+        let mut auth_resp = [0u8; 2];
+        stream
+            .read_exact(&mut auth_resp)
+            .await
+            .expect("SOCKS5 auth response should be read");
+        assert_eq!(auth_resp, [0x01, 0x00], "SOCKS5 auth response");
+    }
+
+    let mut req = Vec::new();
+    req.extend_from_slice(&[0x05, 0x01, 0x00]);
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(addr) => {
+                req.push(0x01);
+                req.extend_from_slice(&addr.octets());
+            }
+            std::net::IpAddr::V6(addr) => {
+                req.push(0x04);
+                req.extend_from_slice(&addr.octets());
+            }
+        }
+    } else {
+        let host = host.as_bytes();
+        assert!(host.len() <= u8::MAX as usize, "domain too long");
+        req.push(0x03);
+        req.push(host.len() as u8);
+        req.extend_from_slice(host);
+    }
+    req.extend_from_slice(&port.to_be_bytes());
+
+    stream
+        .write_all(&req)
+        .await
+        .expect("SOCKS5 CONNECT request should be written");
+
+    let mut header = [0u8; 4];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("SOCKS5 CONNECT response should be read");
+    assert_eq!(header[0], 0x05, "SOCKS5 CONNECT response version");
+    assert_eq!(header[2], 0x00, "SOCKS5 reserved byte");
+
+    let bound_len = match header[3] {
+        0x01 => 4,
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream
+                .read_exact(&mut len)
+                .await
+                .expect("SOCKS5 bound domain length should be read");
+            len[0] as usize
+        }
+        0x04 => 16,
+        other => panic!("unexpected SOCKS5 bound address type: {other:#x}"),
+    };
+    let mut discard = vec![0u8; bound_len + 2];
+    stream
+        .read_exact(&mut discard)
+        .await
+        .expect("SOCKS5 bound address should be read");
+
+    if header[1] == 0x00 {
+        Ok(stream)
+    } else {
+        Err(header[1])
+    }
 }
 
 async fn send_raw_request(proxy_addr: SocketAddr, request: &[u8]) -> Vec<u8> {
@@ -802,6 +942,85 @@ async fn mitm_terminates_client_tls_and_relays_http1() {
 }
 
 #[tokio::test]
+async fn socks5_mitm_terminates_client_tls_and_uses_username_profile() {
+    let ctx = TestContext::new_socks5_mitm("socks5-mitm-ok").await;
+    let tunnel = ctx
+        .client()
+        .connect_socks5_tunnel(
+            "localhost",
+            ctx.origin_addr().port(),
+            Some("profile=firefox-145-macos-arm64"),
+        )
+        .await;
+    let mut tls = ctx
+        .client()
+        .connect_tls("localhost", tunnel, &["http/1.1"], true)
+        .await;
+
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("request should be written");
+
+    let mut resp = Vec::new();
+    tls.read_to_end(&mut resp)
+        .await
+        .expect("response should be read");
+
+    let resp = String::from_utf8_lossy(&resp);
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK\r\n"),
+        "unexpected response: {resp:?}"
+    );
+    assert!(
+        resp.ends_with("socks5-mitm-ok"),
+        "unexpected body: {resp:?}"
+    );
+}
+
+#[tokio::test]
+async fn socks5_mitm_rejects_unknown_username_profile() {
+    let ctx = TestContext::new_socks5_mitm("socks5-unknown-profile").await;
+
+    let result = open_socks5_tunnel(
+        ctx.proxy.addr(),
+        "localhost",
+        ctx.origin_addr().port(),
+        Some("profile=definitely-not-a-profile"),
+    )
+    .await;
+
+    assert_eq!(
+        result.expect_err("unknown username profile should fail"),
+        0x01,
+        "SOCKS5 general failure should be returned for an unknown profile"
+    );
+}
+
+#[tokio::test]
+async fn socks5_mitm_rejects_ip_target_without_clienthello_sni() {
+    let ctx = TestContext::new_socks5_mitm("socks5-ip-no-sni").await;
+    let tunnel = ctx
+        .client()
+        .connect_socks5_tunnel(
+            "127.0.0.1",
+            ctx.origin_addr().port(),
+            Some("chrome-143-macos-arm64"),
+        )
+        .await;
+
+    let connector = build_tls_client_connector(&ctx.proxy_ca.ca_cert_path_str(), &["http/1.1"]);
+    let mut cfg = connector.configure().expect("config");
+    cfg.set_verify(SslVerifyMode::NONE);
+    cfg.set_verify_hostname(false);
+
+    let handshake = tokio_boring::connect(cfg, "127.0.0.1", tunnel).await;
+    assert!(
+        handshake.is_err(),
+        "SOCKS5 MITM should reject IP targets when the ClientHello has no SNI"
+    );
+}
+
+#[tokio::test]
 async fn mitm_selects_profile_per_request_via_connect_header() {
     use crate::http_connect::UPSTREAM_PROFILE_HEADER;
 
@@ -888,6 +1107,7 @@ async fn mitm_allows_insecure_upstream_for_self_signed_targets() {
             .expect("default connector should build");
 
         let proxy = TestProxy::spawn(ProxySettings {
+            protocol: ProxyProtocol::HttpConnect,
             mode: ProxyMode::Mitm(MitmState {
                 ca: proxy_ca.manager.clone(),
                 upstream_profiles,
@@ -932,6 +1152,7 @@ async fn mitm_allows_insecure_upstream_for_self_signed_targets() {
             .expect("default connector should build");
 
         let proxy = TestProxy::spawn(ProxySettings {
+            protocol: ProxyProtocol::HttpConnect,
             mode: ProxyMode::Mitm(MitmState {
                 ca: proxy_ca.manager.clone(),
                 upstream_profiles,
@@ -968,6 +1189,7 @@ async fn mitm_allows_insecure_upstream_for_self_signed_targets() {
 #[tokio::test]
 async fn connect_rejects_unsupported_method_with_405() {
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Passthrough,
     })
     .await;
@@ -988,6 +1210,7 @@ async fn connect_rejects_unsupported_method_with_405() {
 #[tokio::test]
 async fn connect_rejects_invalid_authority_with_400() {
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Passthrough,
     })
     .await;
@@ -1004,6 +1227,7 @@ async fn connect_rejects_invalid_authority_with_400() {
 #[tokio::test]
 async fn connect_rejects_too_large_request_with_431() {
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Passthrough,
     })
     .await;
@@ -1035,6 +1259,7 @@ async fn mitm_rejects_unknown_upstream_profile_with_400() {
     let upstream_verification = UpstreamVerification::default();
 
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Mitm(MitmState {
             ca: proxy_ca.manager.clone(),
             upstream_profiles,
@@ -1062,6 +1287,7 @@ X-PolyTLS-Upstream-Profile: definitely-not-a-profile\r\n\
 #[tokio::test]
 async fn passthrough_returns_502_when_upstream_connect_fails() {
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Passthrough,
     })
     .await;
@@ -1095,6 +1321,7 @@ async fn mitm_returns_502_when_upstream_connect_fails() {
     let upstream_verification = UpstreamVerification::default();
 
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Mitm(MitmState {
             ca: proxy_ca.manager.clone(),
             upstream_profiles,
@@ -1150,6 +1377,7 @@ async fn mitm_allows_upstream_without_alpn_when_client_is_http1() {
         .expect("default connector should build");
 
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Mitm(MitmState {
             ca: proxy_ca.manager.clone(),
             upstream_profiles,
@@ -1255,6 +1483,7 @@ async fn mitm_rejects_alpn_mismatch_between_client_and_upstream() {
         .expect("default connector should build");
 
     let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
         mode: ProxyMode::Mitm(MitmState {
             ca: proxy_ca.manager.clone(),
             upstream_profiles,

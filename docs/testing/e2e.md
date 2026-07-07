@@ -15,6 +15,6 @@ The proxy E2E tests are implemented as **ignored** unit tests (they bind local T
 
 - **Passthrough**: end-to-end TLS is between the client and the origin; the proxy just relays bytes.
 - **MITM**: the client terminates TLS on the proxy (proxy-minted leaf cert), and the proxy opens a separate TLS connection upstream.
-- **Profile selection**: `X-PolyTLS-Upstream-Profile` on `CONNECT` selects the per-request upstream profile (validated via ALPN negotiation).
+- **Profile selection**: `X-PolyTLS-Upstream-Profile` on HTTP `CONNECT` or the SOCKS5 username selects the per-request upstream profile.
+- **SOCKS5 MITM identity**: domain targets can be MITM'd directly; IP targets with ClientHello SNI use SNI for the certificate/upstream TLS name while still dialing the IP; IP targets without ClientHello SNI fail closed.
 - **Insecure upstream**: `UpstreamVerification.insecure_skip_verify` allows connecting to upstream servers with self-signed/private-CA certs (lab use only).
-

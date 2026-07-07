@@ -8,6 +8,7 @@ use crate::profile::{
     add_application_settings, set_alps_use_new_codepoint, set_upstream_session_key,
     upstream_session_cache,
 };
+use crate::socks5::{self, AddressKind, Reply as SocksReply, SocksConnectRequest};
 use boring::ssl::NameType;
 use std::net::SocketAddr;
 use tokio::io::{AsyncWriteExt, copy_bidirectional};
@@ -38,6 +39,12 @@ impl HttpProxyError {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ProxyProtocol {
+    HttpConnect,
+    Socks5,
+}
+
 #[derive(Clone)]
 pub enum ProxyMode {
     Passthrough,
@@ -46,7 +53,48 @@ pub enum ProxyMode {
 
 #[derive(Clone)]
 pub struct ProxySettings {
+    pub protocol: ProxyProtocol,
     pub mode: ProxyMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetAddressKind {
+    Domain,
+    Ip,
+}
+
+#[derive(Debug)]
+struct TunnelRequest {
+    authority: String,
+    host: String,
+    port: u16,
+    profile: Option<String>,
+    leftover: Vec<u8>,
+    address_kind: TargetAddressKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ClientTlsIdentityPolicy {
+    ConnectHost,
+    Socks5,
+}
+
+struct ClientTlsStart {
+    stream: PrefixedStream<TcpStream>,
+    cert_host: String,
+    upstream_tls_name: String,
+    sni_validation_host: String,
+}
+
+struct MitmTunnelRun {
+    client: TcpStream,
+    peer_addr: SocketAddr,
+    mitm: MitmState,
+    tunnel: TunnelRequest,
+    upstream: TcpStream,
+    profile_name: String,
+    upstream_connector: std::sync::Arc<boring::ssl::SslConnector>,
+    identity_policy: ClientTlsIdentityPolicy,
 }
 
 pub async fn run(
@@ -104,13 +152,23 @@ async fn handle_client(
     peer_addr: SocketAddr,
     settings: ProxySettings,
 ) -> Result<()> {
-    match settings.mode {
-        ProxyMode::Passthrough => handle_passthrough(client, peer_addr).await,
-        ProxyMode::Mitm(mitm) => handle_mitm(client, peer_addr, mitm).await,
+    match (settings.protocol, settings.mode) {
+        (ProxyProtocol::HttpConnect, ProxyMode::Passthrough) => {
+            handle_http_passthrough(client, peer_addr).await
+        }
+        (ProxyProtocol::HttpConnect, ProxyMode::Mitm(mitm)) => {
+            handle_http_mitm(client, peer_addr, mitm).await
+        }
+        (ProxyProtocol::Socks5, ProxyMode::Passthrough) => {
+            handle_socks5_passthrough(client, peer_addr).await
+        }
+        (ProxyProtocol::Socks5, ProxyMode::Mitm(mitm)) => {
+            handle_socks5_mitm(client, peer_addr, mitm).await
+        }
     }
 }
 
-async fn handle_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -> Result<()> {
+async fn handle_http_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -> Result<()> {
     let connect = match read_connect_request(&mut client).await {
         Ok(req) => req,
         Err(err) => {
@@ -160,7 +218,64 @@ async fn handle_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -> Res
     Ok(())
 }
 
-async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmState) -> Result<()> {
+async fn handle_socks5_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -> Result<()> {
+    let socks_req = match socks5::accept_connect(&mut client).await {
+        Ok(req) => req,
+        Err(err) => {
+            if let Some(reply) = socks_reply_for_accept_error(&err) {
+                socks5::write_reply(&mut client, reply).await.ok();
+            }
+            return Err(err.into());
+        }
+    };
+    let tunnel = tunnel_from_socks5(socks_req);
+
+    tracing::info!(
+        %peer_addr,
+        authority = %tunnel.authority,
+        host = %tunnel.host,
+        port = tunnel.port,
+        "SOCKS5 CONNECT request"
+    );
+
+    let upstream_target = format!("{}:{}", tunnel.host, tunnel.port);
+    let mut upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
+                .await
+                .ok();
+            return Err(ErrorKind::Io(e).into());
+        }
+        Err(_) => {
+            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
+                .await
+                .ok();
+            return Err(ErrorKind::Timeout.into());
+        }
+    };
+
+    socks5::write_reply(&mut client, SocksReply::Succeeded).await?;
+
+    let mut client = PrefixedStream::new(tunnel.leftover, client);
+    let (client_to_upstream, upstream_to_client) =
+        copy_bidirectional(&mut client, &mut upstream).await?;
+
+    tracing::info!(
+        %peer_addr,
+        client_to_upstream,
+        upstream_to_client,
+        "SOCKS5 tunnel closed"
+    );
+
+    Ok(())
+}
+
+async fn handle_http_mitm(
+    mut client: TcpStream,
+    peer_addr: SocketAddr,
+    mitm: MitmState,
+) -> Result<()> {
     let connect = match read_connect_request(&mut client).await {
         Ok(req) => req,
         Err(err) => {
@@ -169,7 +284,16 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
         }
     };
 
-    let requested_profile = connect.profile.as_deref();
+    let tunnel = TunnelRequest {
+        authority: connect.authority,
+        host: connect.host,
+        port: connect.port,
+        profile: connect.profile,
+        leftover: connect.leftover,
+        address_kind: TargetAddressKind::Domain,
+    };
+
+    let requested_profile = tunnel.profile.as_deref();
     let (profile_name, upstream_connector) = match mitm
         .upstream_profiles
         .connector_for(requested_profile, &mitm.upstream_verification)
@@ -188,15 +312,15 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
 
     tracing::info!(
         %peer_addr,
-        authority = %connect.authority,
-        host = %connect.host,
-        port = connect.port,
+        authority = %tunnel.authority,
+        host = %tunnel.host,
+        port = tunnel.port,
         requested_profile = requested_profile.unwrap_or("<default>"),
         upstream_profile = %profile_name,
         "CONNECT request (mitm)"
     );
 
-    let upstream_target = format!("{}:{}", connect.host, connect.port);
+    let upstream_target = format!("{}:{}", tunnel.host, tunnel.port);
     let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
@@ -215,6 +339,104 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
 
     write_connect_ok(&mut client).await?;
 
+    run_mitm_tunnel(MitmTunnelRun {
+        client,
+        peer_addr,
+        mitm,
+        tunnel,
+        upstream,
+        profile_name,
+        upstream_connector,
+        identity_policy: ClientTlsIdentityPolicy::ConnectHost,
+    })
+    .await
+}
+
+async fn handle_socks5_mitm(
+    mut client: TcpStream,
+    peer_addr: SocketAddr,
+    mitm: MitmState,
+) -> Result<()> {
+    let socks_req = match socks5::accept_connect(&mut client).await {
+        Ok(req) => req,
+        Err(err) => {
+            if let Some(reply) = socks_reply_for_accept_error(&err) {
+                socks5::write_reply(&mut client, reply).await.ok();
+            }
+            return Err(err.into());
+        }
+    };
+    let tunnel = tunnel_from_socks5(socks_req);
+
+    let requested_profile = tunnel.profile.as_deref();
+    let (profile_name, upstream_connector) = match mitm
+        .upstream_profiles
+        .connector_for(requested_profile, &mitm.upstream_verification)
+        .await
+    {
+        Ok(v) => v,
+        Err(err) => {
+            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
+                .await
+                .ok();
+            return Err(err);
+        }
+    };
+
+    tracing::info!(
+        %peer_addr,
+        authority = %tunnel.authority,
+        host = %tunnel.host,
+        port = tunnel.port,
+        requested_profile = requested_profile.unwrap_or("<default>"),
+        upstream_profile = %profile_name,
+        "SOCKS5 CONNECT request (mitm)"
+    );
+
+    let upstream_target = format!("{}:{}", tunnel.host, tunnel.port);
+    let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
+                .await
+                .ok();
+            return Err(ErrorKind::Io(e).into());
+        }
+        Err(_) => {
+            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
+                .await
+                .ok();
+            return Err(ErrorKind::Timeout.into());
+        }
+    };
+
+    socks5::write_reply(&mut client, SocksReply::Succeeded).await?;
+
+    run_mitm_tunnel(MitmTunnelRun {
+        client,
+        peer_addr,
+        mitm,
+        tunnel,
+        upstream,
+        profile_name,
+        upstream_connector,
+        identity_policy: ClientTlsIdentityPolicy::Socks5,
+    })
+    .await
+}
+
+async fn run_mitm_tunnel(run: MitmTunnelRun) -> Result<()> {
+    let MitmTunnelRun {
+        client,
+        peer_addr,
+        mitm,
+        tunnel,
+        upstream,
+        profile_name,
+        upstream_connector,
+        identity_policy,
+    } = run;
+
     let upstream_profile = mitm
         .upstream_profiles
         .profile(&profile_name)
@@ -224,18 +446,26 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
             ))
         })?;
 
-    let client = PrefixedStream::new(connect.leftover, client);
-    let (leaf_cert, leaf_key) = mitm.ca.leaf_for_host(&connect.host).await?;
+    let client_start = prepare_client_tls_start(client, &tunnel, identity_policy).await?;
+    let (leaf_cert, leaf_key) = mitm.ca.leaf_for_host(&client_start.cert_host).await?;
     let acceptor = build_client_acceptor(&leaf_cert, &leaf_key, &upstream_profile.alpn_protos)?;
 
-    let mut client_tls = tokio_boring::accept(&acceptor, client)
+    let mut client_tls = tokio_boring::accept(&acceptor, client_start.stream)
         .await
         .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
 
-    if let Some(err) = sni_mismatch(
-        &connect.host,
-        client_tls.ssl().servername(NameType::HOST_NAME),
-    ) {
+    let client_tls_sni = client_tls.ssl().servername(NameType::HOST_NAME);
+    tracing::info!(
+        %peer_addr,
+        authority = %tunnel.authority,
+        cert_host = %client_start.cert_host,
+        upstream_tls_name = %client_start.upstream_tls_name,
+        sni_validation_host = %client_start.sni_validation_host,
+        client_hello_sni = %client_tls_sni.unwrap_or("<none>"),
+        "client TLS accepted"
+    );
+
+    if let Some(err) = sni_mismatch(&client_start.sni_validation_host, client_tls_sni) {
         return Err(err);
     }
 
@@ -243,7 +473,7 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
         .configure()
         .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
 
-    let session_key = format!("{}:{}", connect.host, connect.port);
+    let session_key = format!("{}:{}", tunnel.host, tunnel.port);
     set_upstream_session_key(&mut connect_config, session_key.clone());
     let session_cache = upstream_session_cache(upstream_connector.as_ref())
         .ok_or_else(|| ErrorKind::Config("upstream connector session cache missing".to_string()))?;
@@ -280,9 +510,10 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
         add_application_settings(&mut connect_config, "h2", &[])?;
     }
 
-    let mut upstream_tls = tokio_boring::connect(connect_config, &connect.host, upstream)
-        .await
-        .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
+    let mut upstream_tls =
+        tokio_boring::connect(connect_config, &client_start.upstream_tls_name, upstream)
+            .await
+            .map_err(|e| ErrorKind::TlsHandshake(e.to_string()))?;
 
     let upstream_alpn_bytes = upstream_tls.ssl().selected_alpn_protocol();
 
@@ -332,6 +563,84 @@ async fn handle_mitm(mut client: TcpStream, peer_addr: SocketAddr, mitm: MitmSta
     );
 
     Ok(())
+}
+
+fn tunnel_from_socks5(req: SocksConnectRequest) -> TunnelRequest {
+    let address_kind = match req.address_kind {
+        AddressKind::Domain => TargetAddressKind::Domain,
+        AddressKind::Ip => TargetAddressKind::Ip,
+    };
+    let authority = format!("{}:{}", req.host, req.port);
+
+    TunnelRequest {
+        authority,
+        host: req.host,
+        port: req.port,
+        profile: req.profile,
+        leftover: Vec::new(),
+        address_kind,
+    }
+}
+
+fn socks_reply_for_accept_error(err: &socks5::SocksError) -> Option<SocksReply> {
+    match err {
+        socks5::SocksError::UnsupportedCommand(_) => Some(SocksReply::CommandNotSupported),
+        socks5::SocksError::UnsupportedAddressType(_) => Some(SocksReply::AddressTypeNotSupported),
+        socks5::SocksError::InvalidReservedByte(_) | socks5::SocksError::InvalidDomain => {
+            Some(SocksReply::GeneralFailure)
+        }
+        socks5::SocksError::Io(_)
+        | socks5::SocksError::UnsupportedVersion(_)
+        | socks5::SocksError::NoAcceptableAuthMethod
+        | socks5::SocksError::InvalidAuthVersion(_) => None,
+    }
+}
+
+async fn prepare_client_tls_start(
+    mut client: TcpStream,
+    tunnel: &TunnelRequest,
+    policy: ClientTlsIdentityPolicy,
+) -> Result<ClientTlsStart> {
+    match policy {
+        ClientTlsIdentityPolicy::ConnectHost => Ok(ClientTlsStart {
+            stream: PrefixedStream::new(tunnel.leftover.clone(), client),
+            cert_host: tunnel.host.clone(),
+            upstream_tls_name: tunnel.host.clone(),
+            sni_validation_host: tunnel.host.clone(),
+        }),
+        ClientTlsIdentityPolicy::Socks5 if tunnel.address_kind == TargetAddressKind::Ip => {
+            let peeked = crate::tls_client_hello::peek_client_hello(&mut client).await?;
+            tracing::info!(
+                authority = %tunnel.authority,
+                target_host = %tunnel.host,
+                port = tunnel.port,
+                client_hello_sni = %peeked.sni.as_deref().unwrap_or("<none>"),
+                client_hello_bytes = peeked.prefix.len(),
+                "peeked SOCKS5 ClientHello"
+            );
+
+            let Some(sni) = peeked.sni else {
+                return Err(ErrorKind::TlsHandshake(
+                    "SOCKS5 MITM requires ClientHello SNI when the target address is an IP"
+                        .to_string(),
+                )
+                .into());
+            };
+
+            Ok(ClientTlsStart {
+                stream: PrefixedStream::new(peeked.prefix, client),
+                cert_host: sni.clone(),
+                upstream_tls_name: sni.clone(),
+                sni_validation_host: sni,
+            })
+        }
+        ClientTlsIdentityPolicy::Socks5 => Ok(ClientTlsStart {
+            stream: PrefixedStream::new(tunnel.leftover.clone(), client),
+            cert_host: tunnel.host.clone(),
+            upstream_tls_name: tunnel.host.clone(),
+            sni_validation_host: tunnel.host.clone(),
+        }),
+    }
 }
 
 fn get_alpn_protocol(client_alpn: Option<&[u8]>) -> Result<Option<crate::alpn::AlpnProtocol>> {
