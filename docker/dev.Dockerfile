@@ -6,7 +6,7 @@ ARG BUILD_DATE
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.92.0 \
+    RUST_VERSION=1.96.1 \
     DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
