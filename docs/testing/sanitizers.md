@@ -4,7 +4,7 @@ PolyTLS can be run under Rust sanitizers (nightly) to catch memory bugs across R
 
 ## Memory testing notes
 
-[`src/compress.rs`](../../src/compress.rs) includes unit tests for the BoringSSL zstd certificate decompression callback ([`raw_ssl_cert_decompress_zstd`](../../src/compress.rs#L143)) that exercise a matrix of pointer/length combinations plus a successful roundtrip.
+[src/compress.rs](../../src/compress.rs) includes unit tests for the BoringSSL zstd certificate decompression callback ([raw_ssl_cert_decompress_zstd](../../src/compress.rs#L143)) that exercise a matrix of pointer/length combinations plus a successful roundtrip.
 
 ### Scudo (Linux only)
 

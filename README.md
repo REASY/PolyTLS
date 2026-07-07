@@ -43,7 +43,7 @@ Passthrough mode (tunnels TLS end-to-end):
 └─────────┘          Encrypted / Relayed        └─────────────┘  Encrypted / Relayed   └──────────────┘
 ```
 
-See the full step-by-step flow (including the `PrefixedStream` "leftover bytes" trick and the ALPN compatibility check): [`docs/architecture/proxy-mitm-flow.md`](docs/architecture/proxy-mitm-flow.md)
+See the full step-by-step flow (including the `PrefixedStream` "leftover bytes" trick and the ALPN compatibility check): [docs/architecture/proxy-mitm-flow.md](docs/architecture/proxy-mitm-flow.md)
 
 ### MITM flow (TL;DR)
 

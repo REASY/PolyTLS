@@ -8,7 +8,7 @@ An explicit proxy with HTTP/1.1 `CONNECT` and SOCKS5 `CONNECT` frontends, with t
 - **Passthrough**: tunnels bytes end-to-end (client TLS terminates on the origin).
 - **MITM**: terminates client TLS on the proxy and originates a new proxy→upstream TLS connection, with configurable outbound (proxy→upstream) ClientHello parameters (“upstream profiles”).
 
-Current implementation entrypoints: [`src/main.rs`](../../src/main.rs#L94), [`src/proxy.rs`](../../src/proxy.rs#L46).
+Current implementation entrypoints: [src/main.rs](../../src/main.rs#L94), [src/proxy.rs](../../src/proxy.rs#L46).
 
 **Important**: This project is intended for systems and traffic you own or are explicitly authorized to test/inspect. It is not intended to bypass third‑party security controls or access restrictions.
 
@@ -64,71 +64,71 @@ Passthrough mode (tunnels TLS end-to-end):
 
 #### 2.2.1 Explicit Proxy Frontends
 - Listens on a plain TCP port and implements HTTP/1.1 proxy semantics for `CONNECT host:port`, or SOCKS5 greeting/auth plus `CONNECT`
-- Enforces request limits: max request bytes (16KiB) + max header count (64) ([`src/http_connect.rs`](../../src/http_connect.rs#L5))
-- Enforces an upstream TCP connect timeout (30s) ([`src/proxy.rs`](../../src/proxy.rs#L12))
-- Defines upstream target selection policy: HTTP `CONNECT` authority or SOCKS5 destination address is the upstream TCP destination; SNI mismatch is fail-closed in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L184), [`src/mitm.rs`](../../src/mitm.rs#L66))
+- Enforces request limits: max request bytes (16KiB) + max header count (64) ([src/http_connect.rs](../../src/http_connect.rs#L5))
+- Enforces an upstream TCP connect timeout (30s) ([src/proxy.rs](../../src/proxy.rs#L12))
+- Defines upstream target selection policy: HTTP `CONNECT` authority or SOCKS5 destination address is the upstream TCP destination; SNI mismatch is fail-closed in MITM mode ([src/proxy.rs](../../src/proxy.rs#L184), [src/mitm.rs](../../src/mitm.rs#L66))
 - In SOCKS5 MITM mode, the username may select the upstream profile. Domain targets use the SOCKS5 domain as the TLS identity. IP targets require ClientHello SNI; PolyTLS fails closed when SNI is missing.
 
 #### 2.2.2 Certificate Authority (CA) Manager
-- Loads an existing root CA from disk or generates a new RSA-2048 root CA on first run ([`src/ca.rs`](../../src/ca.rs#L40))
-- Mints per-host RSA leaf certificates (CN+SAN=`host`) on demand for the client-facing TLS identity name in MITM mode ([`src/ca.rs`](../../src/ca.rs#L91))
-- Caches leaf certs in memory with a TTL ([`src/ca.rs`](../../src/ca.rs#L91))
+- Loads an existing root CA from disk or generates a new RSA-2048 root CA on first run ([src/ca.rs](../../src/ca.rs#L40))
+- Mints per-host RSA leaf certificates (CN+SAN=`host`) on demand for the client-facing TLS identity name in MITM mode ([src/ca.rs](../../src/ca.rs#L91))
+- Caches leaf certs in memory with a TTL ([src/ca.rs](../../src/ca.rs#L91))
 
 #### 2.2.3 TLS Termination Endpoint
 - Accepts incoming client TLS connections
-- Presents dynamically generated leaf certificates to clients in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L213))
-- Enforces `SNI == expected TLS identity name` as a fail-closed policy (after handshake completion) ([`src/proxy.rs`](../../src/proxy.rs#L220), [`src/mitm.rs`](../../src/mitm.rs#L66))
+- Presents dynamically generated leaf certificates to clients in MITM mode ([src/proxy.rs](../../src/proxy.rs#L213))
+- Enforces `SNI == expected TLS identity name` as a fail-closed policy (after handshake completion) ([src/proxy.rs](../../src/proxy.rs#L220), [src/mitm.rs](../../src/mitm.rs#L66))
 
 **Note on SNI timing**: SNI is carried in the client `ClientHello` and is available during the handshake (and can be queried after handshake completion). However, certificate selection must occur **before** the server sends `ServerHello`. HTTP `CONNECT` and SOCKS5 domain targets already provide a DNS identity before TLS starts. SOCKS5 IP targets do not, so PolyTLS peeks the ClientHello before TLS accept and uses SNI as the certificate name and upstream TLS name; if SNI is absent, the connection fails closed.
 
 #### 2.2.4 TLS Origination Endpoint
 - Establishes new TLS connections to upstream servers
-- Applies outbound ClientHello configuration based on a selected upstream profile ([`src/profile.rs`](../../src/profile.rs#L217))
+- Applies outbound ClientHello configuration based on a selected upstream profile ([src/profile.rs](../../src/profile.rs#L217))
 - Optional (future): upstream connection reuse/pooling (requires L7-aware proxying)
 
 #### 2.2.5 Configuration Manager
-- Loads a TOML config file into [`Config`](../../src/config.rs#L4) (TOML-only; `.yaml` is not supported)
-- Provides built-in upstream profiles (`chrome`, `firefox`, `safari`) and optional per-profile overrides from config ([`src/main.rs`](../../src/main.rs#L294), [`src/profile.rs`](../../src/profile.rs#L60))
-- Selects upstream profile per request via `X-PolyTLS-Upstream-Profile` on HTTP `CONNECT`, or via the SOCKS5 username ([`src/http_connect.rs`](../../src/http_connect.rs#L7), [`src/socks5.rs`](../../src/socks5.rs))
+- Loads a TOML config file into [Config](../../src/config.rs#L4) (TOML-only; `.yaml` is not supported)
+- Provides built-in upstream profiles (`chrome`, `firefox`, `safari`) and optional per-profile overrides from config ([src/main.rs](../../src/main.rs#L294), [src/profile.rs](../../src/profile.rs#L60))
+- Selects upstream profile per request via `X-PolyTLS-Upstream-Profile` on HTTP `CONNECT`, or via the SOCKS5 username ([src/http_connect.rs](../../src/http_connect.rs#L7), [src/socks5.rs](../../src/socks5.rs))
 - Does not implement hot reload (future)
 
 #### 2.2.6 Traffic Relay
-- Efficiently moves bytes between connections (no HTTP parsing/translation), using `tokio::io::copy_bidirectional` ([`src/proxy.rs`](../../src/proxy.rs#L7), [`src/proxy.rs`](../../src/proxy.rs#L259))
+- Efficiently moves bytes between connections (no HTTP parsing/translation), using `tokio::io::copy_bidirectional` ([src/proxy.rs](../../src/proxy.rs#L7), [src/proxy.rs](../../src/proxy.rs#L259))
 - Does not maintain an L7 connection model; connection metadata is currently emitted via logs only (future: structured per-connection state/metrics)
 - Optional (future): traffic inspection hooks / L7-aware proxying
 
 ## 3. Technical Requirements
 
 ### 3.0 Proxy Mode Requirements (MVP: Explicit CONNECT)
-- [x] Accept HTTP/1.1 `CONNECT host:port` and reply `200 Connection Established` before starting TLS termination in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L201))
+- [x] Accept HTTP/1.1 `CONNECT host:port` and reply `200 Connection Established` before starting TLS termination in MITM mode ([src/proxy.rs](../../src/proxy.rs#L201))
 - [x] Accept SOCKS5 `CONNECT` and reply success before starting TLS termination in MITM mode
 - [x] Select SOCKS5 per-request upstream profile from username (`<profile-name>` or `profile=<profile-name>`)
 - [x] Fail closed for SOCKS5 IP targets when ClientHello SNI is absent
 - [x] For SOCKS5 IP targets with ClientHello SNI, use SNI as the client-facing certificate name and upstream TLS name while dialing the SOCKS5 IP target
-- [x] Reject non-`CONNECT` methods with a clear HTTP error (`405 Method Not Allowed`) ([`src/http_connect.rs`](../../src/http_connect.rs#L70), [`src/proxy.rs`](../../src/proxy.rs#L279))
-- [x] Upstream target selection: use HTTP `CONNECT` authority or SOCKS5 destination as the upstream TCP destination; enforce SNI mismatch as a policy violation in MITM mode ([`src/proxy.rs`](../../src/proxy.rs#L184), [`src/proxy.rs`](../../src/proxy.rs#L220))
-- [x] Enforce request limits: max request bytes (16KiB) + max header count (64) ([`src/http_connect.rs`](../../src/http_connect.rs#L5))
-- [x] Enforce upstream TCP connect timeout (30s) ([`src/proxy.rs`](../../src/proxy.rs#L12))
+- [x] Reject non-`CONNECT` methods with a clear HTTP error (`405 Method Not Allowed`) ([src/http_connect.rs](../../src/http_connect.rs#L70), [src/proxy.rs](../../src/proxy.rs#L279))
+- [x] Upstream target selection: use HTTP `CONNECT` authority or SOCKS5 destination as the upstream TCP destination; enforce SNI mismatch as a policy violation in MITM mode ([src/proxy.rs](../../src/proxy.rs#L184), [src/proxy.rs](../../src/proxy.rs#L220))
+- [x] Enforce request limits: max request bytes (16KiB) + max header count (64) ([src/http_connect.rs](../../src/http_connect.rs#L5))
+- [x] Enforce upstream TCP connect timeout (30s) ([src/proxy.rs](../../src/proxy.rs#L12))
 - [ ] Idle timeouts for established tunnels (not implemented)
 - [ ] `Proxy-Authorization` / ACLs (not implemented)
-- [x] Correctly parse `host:port` where `host` may be a DNS name, IPv4 literal, or IPv6 literal in brackets (e.g. `CONNECT [2001:db8::1]:443`) ([`src/http_connect.rs`](../../src/http_connect.rs#L119))
+- [x] Correctly parse `host:port` where `host` may be a DNS name, IPv4 literal, or IPv6 literal in brackets (e.g. `CONNECT [2001:db8::1]:443`) ([src/http_connect.rs](../../src/http_connect.rs#L119))
 
 ### 3.1 TLS Fingerprint Customization Features
 
 #### 3.1.1 Implemented (proxy→upstream) Modifications
-- [x] **GREASE** via `set_grease_enabled` ([`src/profile.rs`](../../src/profile.rs#L221))
-- [x] **Extension permutation** via `set_permute_extensions` (optional per profile) ([`src/profile.rs`](../../src/profile.rs#L223))
-- [x] **ALPN list** (profile-driven) ([`src/profile.rs`](../../src/profile.rs#L224))
-- [x] **Session resumption (PSK / `pre_shared_key`)** via a per-profile client session cache; requires a subsequent connection to the same `host:port` ([`src/profile.rs`](../../src/profile.rs#L345), [`src/proxy.rs`](../../src/proxy.rs#L242))
-- [x] **Application Settings (ALPS / `application_settings`)** for `h2` via `SSL_add_application_settings` + `SSL_set_alps_use_new_codepoint` (0x44cd) ([`src/profile.rs`](../../src/profile.rs#L329), [`src/profile.rs`](../../src/profile.rs#L358), [`src/proxy.rs`](../../src/proxy.rs#L279))
-- [x] **Supported groups / named curves** via `set_curves_list` ([`src/profile.rs`](../../src/profile.rs#L262))
-- [x] **TLS 1.2 cipher list** via `set_cipher_list` ([`src/profile.rs`](../../src/profile.rs#L240))
-- [x] **Signature algorithms list** via `set_sigalgs_list` ([`src/profile.rs`](../../src/profile.rs#L246))
-- [x] **OCSP stapling offer** via `enable_ocsp_stapling` ([`src/profile.rs`](../../src/profile.rs#L252))
-- [x] **Signed Certificate Timestamps (SCT) offer** via `enable_signed_cert_timestamps` ([`src/profile.rs`](../../src/profile.rs#L256))
-- [x] **Certificate compression** (`compress_certificate` extension) with zlib/brotli/zstd decompression support ([`src/compress.rs`](../../src/compress.rs#L54))
-- [x] **TLS version bounds** via `set_min_proto_version` / `set_max_proto_version` ([`src/profile.rs`](../../src/profile.rs#L268))
-- [x] **ECH GREASE toggle** applied per upstream connection ([`src/proxy.rs`](../../src/proxy.rs#L230))
+- [x] **GREASE** via `set_grease_enabled` ([src/profile.rs](../../src/profile.rs#L221))
+- [x] **Extension permutation** via `set_permute_extensions` (optional per profile) ([src/profile.rs](../../src/profile.rs#L223))
+- [x] **ALPN list** (profile-driven) ([src/profile.rs](../../src/profile.rs#L224))
+- [x] **Session resumption (PSK / `pre_shared_key`)** via a per-profile client session cache; requires a subsequent connection to the same `host:port` ([src/profile.rs](../../src/profile.rs#L345), [src/proxy.rs](../../src/proxy.rs#L242))
+- [x] **Application Settings (ALPS / `application_settings`)** for `h2` via `SSL_add_application_settings` + `SSL_set_alps_use_new_codepoint` (0x44cd) ([src/profile.rs](../../src/profile.rs#L329), [src/profile.rs](../../src/profile.rs#L358), [src/proxy.rs](../../src/proxy.rs#L279))
+- [x] **Supported groups / named curves** via `set_curves_list` ([src/profile.rs](../../src/profile.rs#L262))
+- [x] **TLS 1.2 cipher list** via `set_cipher_list` ([src/profile.rs](../../src/profile.rs#L240))
+- [x] **Signature algorithms list** via `set_sigalgs_list` ([src/profile.rs](../../src/profile.rs#L246))
+- [x] **OCSP stapling offer** via `enable_ocsp_stapling` ([src/profile.rs](../../src/profile.rs#L252))
+- [x] **Signed Certificate Timestamps (SCT) offer** via `enable_signed_cert_timestamps` ([src/profile.rs](../../src/profile.rs#L256))
+- [x] **Certificate compression** (`compress_certificate` extension) with zlib/brotli/zstd decompression support ([src/compress.rs](../../src/compress.rs#L54))
+- [x] **TLS version bounds** via `set_min_proto_version` / `set_max_proto_version` ([src/profile.rs](../../src/profile.rs#L268))
+- [x] **ECH GREASE toggle** applied per upstream connection ([src/proxy.rs](../../src/proxy.rs#L230))
 
 **JA3/JA4 note**: Extension order is fingerprint-significant (JA3 is order-sensitive). If your goal is to reproduce a *specific* client fingerprint (e.g., "Chrome 120"), you generally want a deterministic extension order rather than random permutation.
 
@@ -141,14 +141,14 @@ Passthrough mode (tunnels TLS end-to-end):
 ### 3.2 Certificate Management
 
 #### 3.2.1 Root CA Requirements
-- [x] Generate an RSA 2048-bit root CA on first run and persist to disk ([`src/ca.rs`](../../src/ca.rs#L40))
-- [x] Support custom CA import by providing existing `ca_key_path`/`ca_cert_path` ([`src/main.rs`](../../src/main.rs#L57))
-- [x] Provide CA certificate export for client installation: the root CA certificate is a PEM file on disk (default `./ca/certificate.pem`) ([`src/main.rs`](../../src/main.rs#L61))
-- [ ] Persist to disk with password protection / encrypted private key (not implemented; key is stored as unencrypted PKCS#8 PEM, chmod 0600 on Unix) ([`src/ca.rs`](../../src/ca.rs#L69))
+- [x] Generate an RSA 2048-bit root CA on first run and persist to disk ([src/ca.rs](../../src/ca.rs#L40))
+- [x] Support custom CA import by providing existing `ca_key_path`/`ca_cert_path` ([src/main.rs](../../src/main.rs#L57))
+- [x] Provide CA certificate export for client installation: the root CA certificate is a PEM file on disk (default `./ca/certificate.pem`) ([src/main.rs](../../src/main.rs#L61))
+- [ ] Persist to disk with password protection / encrypted private key (not implemented; key is stored as unencrypted PKCS#8 PEM, chmod 0600 on Unix) ([src/ca.rs](../../src/ca.rs#L69))
 
 #### 3.2.2 Leaf Certificate Generation
-- [x] Generate certificates on-demand for each client-facing TLS identity name, and present CN+SAN=`host` ([`src/ca.rs`](../../src/ca.rs#L91))
-- [x] Implement leaf certificate caching with TTL (in-memory) ([`src/ca.rs`](../../src/ca.rs#L91))
+- [x] Generate certificates on-demand for each client-facing TLS identity name, and present CN+SAN=`host` ([src/ca.rs](../../src/ca.rs#L91))
+- [x] Implement leaf certificate caching with TTL (in-memory) ([src/ca.rs](../../src/ca.rs#L91))
 - [ ] Multi-domain (multi-SAN) certificates (not implemented)
 - [ ] OCSP response generation (not implemented)
 
@@ -161,28 +161,28 @@ Passthrough mode (tunnels TLS end-to-end):
 ### 3.4 Security Requirements
 - [ ] Secure private key storage (encrypted at rest / HSM) (not implemented)
 - [ ] Certificate transparency logging (optional)
-- [x] Upstream TCP connect timeout (30s) ([`src/proxy.rs`](../../src/proxy.rs#L12))
+- [x] Upstream TCP connect timeout (30s) ([src/proxy.rs](../../src/proxy.rs#L12))
 - [ ] Rate limiting / connection limits (not implemented)
 - [ ] Audit logging for all generated certificates
-- [x] Upstream verification policy: verify by default; allow opt-out for controlled lab targets ([`src/profile.rs`](../../src/profile.rs#L190), [`src/main.rs`](../../src/main.rs#L236))
+- [x] Upstream verification policy: verify by default; allow opt-out for controlled lab targets ([src/profile.rs](../../src/profile.rs#L190), [src/main.rs](../../src/main.rs#L236))
 - [ ] Secure configuration management
-- [x] Safer default listener binding: `127.0.0.1:8080` unless configured otherwise ([`src/main.rs`](../../src/main.rs#L109))
+- [x] Safer default listener binding: `127.0.0.1:8080` unless configured otherwise ([src/main.rs](../../src/main.rs#L109))
 - [ ] Proxy authentication / ACLs (not implemented)
-- [x] Safe defaults: avoid logging decrypted payloads; log only metadata and byte counts ([`src/proxy.rs`](../../src/proxy.rs#L174), [`src/proxy.rs`](../../src/proxy.rs#L262))
+- [x] Safe defaults: avoid logging decrypted payloads; log only metadata and byte counts ([src/proxy.rs](../../src/proxy.rs#L174), [src/proxy.rs](../../src/proxy.rs#L262))
 
 ## 4. Implementation Details
 
 ### 4.1 Technology Stack
 
 #### 4.1.1 Primary Dependencies
-Authoritative dependencies live in [`Cargo.toml`](../../Cargo.toml#L1). Core crates in the current implementation:
+Authoritative dependencies live in [Cargo.toml](../../Cargo.toml#L1). Core crates in the current implementation:
 
-- **Runtime / async IO**: `tokio`, `tokio-boring` ([`src/proxy.rs`](../../src/proxy.rs#L7))
-- **TLS (BoringSSL bindings)**: `boring`, `boring-sys` ([`src/profile.rs`](../../src/profile.rs#L1))
-- **HTTP/1.1 CONNECT parsing**: `httparse` ([`src/http_connect.rs`](../../src/http_connect.rs#L62))
-- **Config**: `serde` + `toml` ([`src/config.rs`](../../src/config.rs#L1), [`src/main.rs`](../../src/main.rs#L152))
-- **Tracing / telemetry**: `tracing` + OpenTelemetry OTLP (`opentelemetry-*`) ([`src/telemetry`](../../src/telemetry/logger.rs#L1))
-- **Certificate compression decompressors**: `flate2` (zlib), `brotli`, `zstd` ([`src/compress.rs`](../../src/compress.rs#L88))
+- **Runtime / async IO**: `tokio`, `tokio-boring` ([src/proxy.rs](../../src/proxy.rs#L7))
+- **TLS (BoringSSL bindings)**: `boring`, `boring-sys` ([src/profile.rs](../../src/profile.rs#L1))
+- **HTTP/1.1 CONNECT parsing**: `httparse` ([src/http_connect.rs](../../src/http_connect.rs#L62))
+- **Config**: `serde` + `toml` ([src/config.rs](../../src/config.rs#L1), [src/main.rs](../../src/main.rs#L152))
+- **Tracing / telemetry**: `tracing` + OpenTelemetry OTLP (`opentelemetry-*`) ([src/telemetry](../../src/telemetry/logger.rs#L1))
+- **Certificate compression decompressors**: `flate2` (zlib), `brotli`, `zstd` ([src/compress.rs](../../src/compress.rs#L88))
 
 #### 4.1.2 BoringSSL Capability Notes (Reality Check)
 BoringSSL exposes fewer knobs than "raw ClientHello crafting". For an MVP, focus on what is configurable via supported APIs:
@@ -190,7 +190,7 @@ BoringSSL exposes fewer knobs than "raw ClientHello crafting". For an MVP, focus
 - Version-dependent / library-limited: controlling the exact offered signature algorithms, OCSP/SCT offering behavior, certificate compression, and application settings.
 - Typically requires patching/forking BoringSSL (or pinning to a very specific commit): arbitrary custom extension injection, byte-for-byte reproduction of a third-party ClientHello (including extension ordering/values beyond exposed config), and record-layer version "tricks".
 
-**ALPS codepoint selection (JA4 impact)**: PolyTLS enables ALPS via `SSL_add_application_settings` ([`src/profile.rs`](../../src/profile.rs#L329)). Modern Chrome reports the newer draft codepoint `17613` (`0x44cd`). When ALPS is enabled, PolyTLS can switch to the newer codepoint via `SSL_set_alps_use_new_codepoint` ([`src/profile.rs`](../../src/profile.rs#L358)), which is applied per upstream connection in `handle_mitm` ([`src/proxy.rs`](../../src/proxy.rs#L279)). You can override this per profile via `profiles.<name>.alps_use_new_codepoint` ([`src/config.rs`](../../src/config.rs#L59)).
+**ALPS codepoint selection (JA4 impact)**: PolyTLS enables ALPS via `SSL_add_application_settings` ([src/profile.rs](../../src/profile.rs#L329)). Modern Chrome reports the newer draft codepoint `17613` (`0x44cd`). When ALPS is enabled, PolyTLS can switch to the newer codepoint via `SSL_set_alps_use_new_codepoint` ([src/profile.rs](../../src/profile.rs#L358)), which is applied per upstream connection in `handle_mitm` ([src/proxy.rs](../../src/proxy.rs#L279)). You can override this per profile via `profiles.<name>.alps_use_new_codepoint` ([src/config.rs](../../src/config.rs#L59)).
 
 
 ### 4.2 Configuration Format
@@ -257,12 +257,12 @@ cache_ttl = 3600 # seconds
 ```
 
 Per-request profile selection:
-- The client may include `X-PolyTLS-Upstream-Profile: <profile-name>` in the HTTP CONNECT request ([`src/http_connect.rs`](../../src/http_connect.rs#L7)).
+- The client may include `X-PolyTLS-Upstream-Profile: <profile-name>` in the HTTP CONNECT request ([src/http_connect.rs](../../src/http_connect.rs#L7)).
 - SOCKS5 clients may put `<profile-name>` or `profile=<profile-name>` in the username field.
 
 Implementation notes:
-- Config file format is TOML only (enforced by [`read_config`](../../src/main.rs#L152)); see [`config/example.toml`](../../config/example.toml#L1).
-- Built-in profile names are created in [`init_default_profiles`](../../src/main.rs#L294); profile structs live in [`src/profile.rs`](../../src/profile.rs#L38).
+- Config file format is TOML only (enforced by [read_config](../../src/main.rs#L152)); see [config/example.toml](../../config/example.toml#L1).
+- Built-in profile names are created in [init_default_profiles](../../src/main.rs#L294); profile structs live in [src/profile.rs](../../src/profile.rs#L38).
 
 ### 4.3 API Design
 
@@ -292,15 +292,15 @@ struct ProxyControl {
 
 The data plane is implemented as a per-connection async task that performs:
 
-1. Parse HTTP `CONNECT` (and optionally extract `X-PolyTLS-Upstream-Profile`) via [`read_connect_request`](../../src/http_connect.rs#L36), or parse SOCKS5 `CONNECT` via [`src/socks5.rs`](../../src/socks5.rs).
-2. Establish an upstream TCP connection with a timeout ([`src/proxy.rs`](../../src/proxy.rs#L115)).
-3. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([`src/proxy.rs`](../../src/proxy.rs#L272), [`src/socks5.rs`](../../src/socks5.rs)).
-4. Relay bytes bidirectionally using `tokio::io::copy_bidirectional` ([`src/proxy.rs`](../../src/proxy.rs#L134), [`src/proxy.rs`](../../src/proxy.rs#L259)).
+1. Parse HTTP `CONNECT` (and optionally extract `X-PolyTLS-Upstream-Profile`) via [read_connect_request](../../src/http_connect.rs#L36), or parse SOCKS5 `CONNECT` via [src/socks5.rs](../../src/socks5.rs).
+2. Establish an upstream TCP connection with a timeout ([src/proxy.rs](../../src/proxy.rs#L115)).
+3. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([src/proxy.rs](../../src/proxy.rs#L272), [src/socks5.rs](../../src/socks5.rs)).
+4. Relay bytes bidirectionally using `tokio::io::copy_bidirectional` ([src/proxy.rs](../../src/proxy.rs#L134), [src/proxy.rs](../../src/proxy.rs#L259)).
 
 Two modes differ only in what is relayed:
 
-- **Passthrough**: raw `TcpStream` ↔ `TcpStream`, with `PrefixedStream` used to re-inject any bytes already read past the end of the CONNECT headers ([`src/prefixed_stream.rs`](../../src/prefixed_stream.rs#L5)).
-- **MITM**: `tokio_boring::SslStream` ↔ `tokio_boring::SslStream` (TLS terminated on the proxy, then re-originated upstream), with SNI mismatch enforcement and ALPN compatibility enforcement (ALPN must match when present; if upstream omits ALPN, treat it as compatible with `http/1.1`) ([`src/proxy.rs`](../../src/proxy.rs#L213), [`src/proxy.rs`](../../src/proxy.rs#L237)).
+- **Passthrough**: raw `TcpStream` ↔ `TcpStream`, with `PrefixedStream` used to re-inject any bytes already read past the end of the CONNECT headers ([src/prefixed_stream.rs](../../src/prefixed_stream.rs#L5)).
+- **MITM**: `tokio_boring::SslStream` ↔ `tokio_boring::SslStream` (TLS terminated on the proxy, then re-originated upstream), with SNI mismatch enforcement and ALPN compatibility enforcement (ALPN must match when present; if upstream omits ALPN, treat it as compatible with `http/1.1`) ([src/proxy.rs](../../src/proxy.rs#L213), [src/proxy.rs](../../src/proxy.rs#L237)).
 
 For SOCKS5 MITM, domain targets are the common browser path. `curl --socks5-hostname` also sends a domain target. `curl --socks5` resolves locally and sends an IP target, while the URL/SNI/HTTP host can remain the DNS name; this is the path that exercises ClientHello pre-peeking. Directly opening `https://<ip>/...` in a browser is not equivalent because the URL host, TLS SNI, certificate validation name, and HTTP `Host`/HTTP/2 `:authority` all become the IP address.
 
@@ -323,10 +323,10 @@ The current code does not model a persistent `ProxyConnection` struct or store p
 
 #### 4.4.2 Recovery Strategies
 
-- **CONNECT request validation**: parse/validation failures map to HTTP errors (`405`/`431`/`400`) before sending `200` ([`src/proxy.rs`](../../src/proxy.rs#L279)).
-- **Upstream connect failures**: map to `502`/`504` before sending `200` ([`src/proxy.rs`](../../src/proxy.rs#L116), [`src/proxy.rs`](../../src/proxy.rs#L185)).
+- **CONNECT request validation**: parse/validation failures map to HTTP errors (`405`/`431`/`400`) before sending `200` ([src/proxy.rs](../../src/proxy.rs#L279)).
+- **Upstream connect failures**: map to `502`/`504` before sending `200` ([src/proxy.rs](../../src/proxy.rs#L116), [src/proxy.rs](../../src/proxy.rs#L185)).
 - **TLS failures after `200`**: the tunnel is already established; clients observe EOF/connection reset (current behavior).
-- **Certificate caching**: leaf certificates are cached with a TTL to avoid repeated generation ([`src/ca.rs`](../../src/ca.rs#L91)).
+- **Certificate caching**: leaf certificates are cached with a TTL to avoid repeated generation ([src/ca.rs](../../src/ca.rs#L91)).
 - [ ] Retry with fallback profile (not implemented)
 - [ ] Circuit breaker/backoff for upstream failures (not implemented)
 
@@ -334,17 +334,17 @@ The current code does not model a persistent `ProxyConnection` struct or store p
 ## 5. Implementation Status (Current)
 
 Implemented:
-- Explicit proxy (HTTP/1.1 `CONNECT`) with `Passthrough` and `MITM` modes ([`src/proxy.rs`](../../src/proxy.rs#L35))
-- Root CA generation + per-host leaf minting with TTL cache ([`src/ca.rs`](../../src/ca.rs#L40))
-- Upstream TLS profile selection (default + per-request header) ([`src/main.rs`](../../src/main.rs#L270), [`src/http_connect.rs`](../../src/http_connect.rs#L84))
-- Upstream ClientHello knobs via BoringSSL (GREASE/permutation/ALPN/curves/cipher list/sigalgs/OCSP/SCT/cert compression) ([`src/profile.rs`](../../src/profile.rs#L217))
-- OpenTelemetry/OTLP logging+metrics plumbing and graceful shutdown ([`src/telemetry/logger.rs`](../../src/telemetry/logger.rs#L1), [`src/main.rs`](../../src/main.rs#L132))
-- **H2 Support**: L4 tunneling of HTTP/2 traffic via coordinated ALPN negotiation ([`src/proxy.rs`](../../src/proxy.rs)).
+- Explicit proxy (HTTP/1.1 `CONNECT`) with `Passthrough` and `MITM` modes ([src/proxy.rs](../../src/proxy.rs#L35))
+- Root CA generation + per-host leaf minting with TTL cache ([src/ca.rs](../../src/ca.rs#L40))
+- Upstream TLS profile selection (default + per-request header) ([src/main.rs](../../src/main.rs#L270), [src/http_connect.rs](../../src/http_connect.rs#L84))
+- Upstream ClientHello knobs via BoringSSL (GREASE/permutation/ALPN/curves/cipher list/sigalgs/OCSP/SCT/cert compression) ([src/profile.rs](../../src/profile.rs#L217))
+- OpenTelemetry/OTLP logging+metrics plumbing and graceful shutdown ([src/telemetry/logger.rs](../../src/telemetry/logger.rs#L1), [src/main.rs](../../src/main.rs#L132))
+- **H2 Support**: L4 tunneling of HTTP/2 traffic via coordinated ALPN negotiation ([src/proxy.rs](../../src/proxy.rs)).
 
 Not implemented yet (examples):
-- Control plane API, hot-reload configuration, health/readiness endpoints ([`docs/specs/tls_mitm.md`](tls_mitm.md#L251))
-- Transparent/TProxy mode (explicit mode only; enforced) ([`src/main.rs`](../../src/main.rs#L119))
-- HTTP/2 translation/fingerprinting (SETTINGS/HPACK/etc); current relay is byte-only ([`src/proxy.rs`](../../src/proxy.rs#L259))
+- Control plane API, hot-reload configuration, health/readiness endpoints ([docs/specs/tls_mitm.md](tls_mitm.md#L251))
+- Transparent/TProxy mode (explicit mode only; enforced) ([src/main.rs](../../src/main.rs#L119))
+- HTTP/2 translation/fingerprinting (SETTINGS/HPACK/etc); current relay is byte-only ([src/proxy.rs](../../src/proxy.rs#L259))
 
 
 ## 6. Testing Strategy
@@ -396,7 +396,7 @@ $ openssl s_client -proxy 127.0.0.1:8080 -connect example.com:443 -servername ex
 ## 7. Deployment Considerations
 
 ### 7.1 Containerization
-The repository includes a production-style Docker build in [`docker/Dockerfile`](../../docker/Dockerfile#L1).
+The repository includes a production-style Docker build in [docker/Dockerfile](../../docker/Dockerfile#L1).
 
 Operational notes:
 - For MITM mode, clients must trust the proxy root CA (or use `--insecure` for lab-only testing). Persist the CA directory (`./ca`) across container restarts to keep a stable root CA.
@@ -415,7 +415,7 @@ Operational notes:
 
 ### 7.3 Monitoring
 
-- OpenTelemetry/OTLP logging and metrics are initialized from [`src/main.rs`](../../src/main.rs#L95) via [`src/telemetry`](../../src/telemetry/logger.rs#L1).
+- OpenTelemetry/OTLP logging and metrics are initialized from [src/main.rs](../../src/main.rs#L95) via [src/telemetry](../../src/telemetry/logger.rs#L1).
 - No HTTP health/readiness endpoints are implemented (future enhancement).
 
 
