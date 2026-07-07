@@ -213,8 +213,7 @@ impl TestTlsOrigin {
             .await
             .expect("origin leaf should be created");
 
-        let mut builder =
-            SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).expect("acceptor");
+        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).expect("acceptor");
         builder
             .set_certificate(&leaf_cert)
             .expect("origin cert should be set");
@@ -641,7 +640,7 @@ impl TestContext {
 }
 
 fn build_tls_client_connector(ca_file: &str, alpn_protos: &[&str]) -> SslConnector {
-    let mut builder = SslConnector::builder(SslMethod::tls_client()).expect("client builder");
+    let mut builder = SslConnector::builder(SslMethod::tls()).expect("client builder");
     builder
         .set_ca_file(ca_file)
         .expect("client CA should be set");

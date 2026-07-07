@@ -15,9 +15,6 @@
 //! - `STRESS_TEST_LONG=1 STRESS_TEST_CONCURRENCY=200 cargo test stress_mitm_proxy -- --ignored --nocapture`
 
 use super::tests::TestContext;
-use rand::Rng;
-use rand::SeedableRng;
-use rand::prelude::StdRng;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -58,17 +55,16 @@ async fn stress_mitm_proxy() {
 
         set.spawn(async move {
             let client = crate::proxy::tests::TestClient::new(proxy_addr, Some(proxy_ca_cert_path));
-            let mut rng = StdRng::from_os_rng();
             let mut req_count = 0;
 
             while start.elapsed() < duration {
                 // Randomly sleep a bit to stagger requests
-                if rng.random_bool(0.1) {
-                    tokio::time::sleep(Duration::from_millis(rng.random_range(1..10))).await;
+                if rand::random_bool(0.1) {
+                    tokio::time::sleep(Duration::from_millis(rand::random_range(1..10))).await;
                 }
 
                 // Randomize ALPN
-                let use_h2 = rng.random_bool(0.5);
+                let use_h2 = rand::random_bool(0.5);
                 let alpn = if use_h2 {
                     vec!["h2", "http/1.1"]
                 } else {
@@ -77,7 +73,7 @@ async fn stress_mitm_proxy() {
 
                 // Random extra headers
                 let mut extra_headers = Vec::new();
-                if rng.random_bool(0.3) {
+                if rand::random_bool(0.3) {
                     extra_headers.push(("X-Random-Header", "random-value"));
                 }
 

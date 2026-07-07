@@ -18,7 +18,7 @@ pub fn build_client_acceptor(
     leaf_key: &PKey<Private>,
     alpn_protos: &[String],
 ) -> Result<SslAcceptor> {
-    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())?;
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
     builder.set_certificate(leaf_cert)?;
     builder.set_private_key(leaf_key)?;
     builder.check_private_key()?;

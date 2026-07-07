@@ -237,7 +237,7 @@ pub fn build_upstream_connector(
     profile: &UpstreamProfile,
     verification: &UpstreamVerification,
 ) -> Result<SslConnector> {
-    let mut builder = SslConnector::builder(SslMethod::tls_client())?;
+    let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_grease_enabled(profile.grease);
     builder.set_permute_extensions(profile.permute_extensions);
     builder
@@ -552,8 +552,7 @@ mod tests {
         let host = "example.com";
         let (cert, key) = self_signed_cert(host);
 
-        let mut builder =
-            SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).expect("acceptor");
+        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).expect("acceptor");
         builder
             .set_certificate(&cert)
             .expect("server cert should be set");
@@ -627,8 +626,7 @@ mod tests {
         let host = "example.com";
         let (cert, key) = self_signed_cert(host);
 
-        let mut builder =
-            SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).expect("acceptor");
+        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).expect("acceptor");
         builder
             .set_certificate(&cert)
             .expect("server cert should be set");
