@@ -25,6 +25,18 @@ default_profile = "firefox-145-macos-arm64"
 # Lab-only: disable upstream certificate/hostname verification (like curl -k).
 insecure_skip_verify = false
 
+# Optional chained SOCKS5 proxy for PolyTLS outbound connections. When enabled,
+# PolyTLS connects to this SOCKS5 proxy first, asks it to CONNECT to the original
+# target host:port, then starts passthrough relay or upstream TLS over that tunnel.
+# Config values can also be overridden through environment variables, for example:
+# POLYTLS__PROXY__UPSTREAM__PROXY__ADDRESS=127.0.0.1:9050
+#
+# [proxy.upstream.proxy]
+# protocol = "socks5"
+# address = "127.0.0.1:9050"
+# username = "optional-chain-user"
+# password = "optional-chain-password"
+
 [proxy.certificate]
 ca_key_path = "./ca/private.key"
 ca_cert_path = "./ca/certificate.pem"

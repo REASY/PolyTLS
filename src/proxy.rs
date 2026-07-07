@@ -9,6 +9,7 @@ use crate::profile::{
     upstream_session_cache,
 };
 use crate::socks5::{self, AddressKind, Reply as SocksReply, SocksConnectRequest};
+use crate::upstream::UpstreamProxy;
 use boring::ssl::NameType;
 use std::net::SocketAddr;
 use tokio::io::{AsyncWriteExt, copy_bidirectional};
@@ -55,6 +56,7 @@ pub enum ProxyMode {
 pub struct ProxySettings {
     pub protocol: ProxyProtocol,
     pub mode: ProxyMode,
+    pub upstream: UpstreamProxy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,23 +154,28 @@ async fn handle_client(
     peer_addr: SocketAddr,
     settings: ProxySettings,
 ) -> Result<()> {
+    let upstream = settings.upstream.clone();
     match (settings.protocol, settings.mode) {
         (ProxyProtocol::HttpConnect, ProxyMode::Passthrough) => {
-            handle_http_passthrough(client, peer_addr).await
+            handle_http_passthrough(client, peer_addr, upstream).await
         }
         (ProxyProtocol::HttpConnect, ProxyMode::Mitm(mitm)) => {
-            handle_http_mitm(client, peer_addr, mitm).await
+            handle_http_mitm(client, peer_addr, mitm, upstream).await
         }
         (ProxyProtocol::Socks5, ProxyMode::Passthrough) => {
-            handle_socks5_passthrough(client, peer_addr).await
+            handle_socks5_passthrough(client, peer_addr, upstream).await
         }
         (ProxyProtocol::Socks5, ProxyMode::Mitm(mitm)) => {
-            handle_socks5_mitm(client, peer_addr, mitm).await
+            handle_socks5_mitm(client, peer_addr, mitm, upstream).await
         }
     }
 }
 
-async fn handle_http_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -> Result<()> {
+async fn handle_http_passthrough(
+    mut client: TcpStream,
+    peer_addr: SocketAddr,
+    upstream_proxy: UpstreamProxy,
+) -> Result<()> {
     let connect = match read_connect_request(&mut client).await {
         Ok(req) => req,
         Err(err) => {
@@ -185,20 +192,15 @@ async fn handle_http_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -
         "CONNECT request"
     );
 
-    let upstream_target = format!("{}:{}", connect.host, connect.port);
-    let mut upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            write_http_error(&mut client, HttpProxyError::BadGateway)
-                .await
-                .ok();
-            return Err(ErrorKind::Io(e).into());
-        }
-        Err(_) => {
-            write_http_error(&mut client, HttpProxyError::GatewayTimeout)
-                .await
-                .ok();
-            return Err(ErrorKind::Timeout.into());
+    let mut upstream = match dial_upstream(&upstream_proxy, &connect.host, connect.port).await {
+        Ok(s) => s,
+        Err(err) => {
+            let http_err = match err.kind() {
+                ErrorKind::Timeout => HttpProxyError::GatewayTimeout,
+                _ => HttpProxyError::BadGateway,
+            };
+            write_http_error(&mut client, http_err).await.ok();
+            return Err(err);
         }
     };
 
@@ -218,7 +220,11 @@ async fn handle_http_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -
     Ok(())
 }
 
-async fn handle_socks5_passthrough(mut client: TcpStream, peer_addr: SocketAddr) -> Result<()> {
+async fn handle_socks5_passthrough(
+    mut client: TcpStream,
+    peer_addr: SocketAddr,
+    upstream_proxy: UpstreamProxy,
+) -> Result<()> {
     let socks_req = match socks5::accept_connect(&mut client).await {
         Ok(req) => req,
         Err(err) => {
@@ -238,20 +244,13 @@ async fn handle_socks5_passthrough(mut client: TcpStream, peer_addr: SocketAddr)
         "SOCKS5 CONNECT request"
     );
 
-    let upstream_target = format!("{}:{}", tunnel.host, tunnel.port);
-    let mut upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
+    let mut upstream = match dial_upstream(&upstream_proxy, &tunnel.host, tunnel.port).await {
+        Ok(s) => s,
+        Err(err) => {
             socks5::write_reply(&mut client, SocksReply::GeneralFailure)
                 .await
                 .ok();
-            return Err(ErrorKind::Io(e).into());
-        }
-        Err(_) => {
-            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
-                .await
-                .ok();
-            return Err(ErrorKind::Timeout.into());
+            return Err(err);
         }
     };
 
@@ -275,6 +274,7 @@ async fn handle_http_mitm(
     mut client: TcpStream,
     peer_addr: SocketAddr,
     mitm: MitmState,
+    upstream_proxy: UpstreamProxy,
 ) -> Result<()> {
     let connect = match read_connect_request(&mut client).await {
         Ok(req) => req,
@@ -320,20 +320,15 @@ async fn handle_http_mitm(
         "CONNECT request (mitm)"
     );
 
-    let upstream_target = format!("{}:{}", tunnel.host, tunnel.port);
-    let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            write_http_error(&mut client, HttpProxyError::BadGateway)
-                .await
-                .ok();
-            return Err(ErrorKind::Io(e).into());
-        }
-        Err(_) => {
-            write_http_error(&mut client, HttpProxyError::GatewayTimeout)
-                .await
-                .ok();
-            return Err(ErrorKind::Timeout.into());
+    let upstream = match dial_upstream(&upstream_proxy, &tunnel.host, tunnel.port).await {
+        Ok(s) => s,
+        Err(err) => {
+            let http_err = match err.kind() {
+                ErrorKind::Timeout => HttpProxyError::GatewayTimeout,
+                _ => HttpProxyError::BadGateway,
+            };
+            write_http_error(&mut client, http_err).await.ok();
+            return Err(err);
         }
     };
 
@@ -356,6 +351,7 @@ async fn handle_socks5_mitm(
     mut client: TcpStream,
     peer_addr: SocketAddr,
     mitm: MitmState,
+    upstream_proxy: UpstreamProxy,
 ) -> Result<()> {
     let socks_req = match socks5::accept_connect(&mut client).await {
         Ok(req) => req,
@@ -393,20 +389,13 @@ async fn handle_socks5_mitm(
         "SOCKS5 CONNECT request (mitm)"
     );
 
-    let upstream_target = format!("{}:{}", tunnel.host, tunnel.port);
-    let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(&upstream_target)).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
+    let upstream = match dial_upstream(&upstream_proxy, &tunnel.host, tunnel.port).await {
+        Ok(s) => s,
+        Err(err) => {
             socks5::write_reply(&mut client, SocksReply::GeneralFailure)
                 .await
                 .ok();
-            return Err(ErrorKind::Io(e).into());
-        }
-        Err(_) => {
-            socks5::write_reply(&mut client, SocksReply::GeneralFailure)
-                .await
-                .ok();
-            return Err(ErrorKind::Timeout.into());
+            return Err(err);
         }
     };
 
@@ -565,6 +554,13 @@ async fn run_mitm_tunnel(run: MitmTunnelRun) -> Result<()> {
     Ok(())
 }
 
+async fn dial_upstream(upstream: &UpstreamProxy, host: &str, port: u16) -> Result<TcpStream> {
+    match timeout(CONNECT_TIMEOUT, upstream.connect(host, port)).await {
+        Ok(result) => result,
+        Err(_) => Err(ErrorKind::Timeout.into()),
+    }
+}
+
 fn tunnel_from_socks5(req: SocksConnectRequest) -> TunnelRequest {
     let address_kind = match req.address_kind {
         AddressKind::Domain => TargetAddressKind::Domain,
@@ -592,7 +588,11 @@ fn socks_reply_for_accept_error(err: &socks5::SocksError) -> Option<SocksReply> 
         socks5::SocksError::Io(_)
         | socks5::SocksError::UnsupportedVersion(_)
         | socks5::SocksError::NoAcceptableAuthMethod
-        | socks5::SocksError::InvalidAuthVersion(_) => None,
+        | socks5::SocksError::InvalidAuthVersion(_)
+        | socks5::SocksError::UpstreamMethodRejected(_)
+        | socks5::SocksError::UpstreamAuthRejected(_)
+        | socks5::SocksError::UpstreamConnectRejected(_)
+        | socks5::SocksError::InvalidUpstreamReply(_) => None,
     }
 }
 

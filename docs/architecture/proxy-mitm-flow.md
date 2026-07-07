@@ -8,6 +8,7 @@ Primary implementation: [src/proxy.rs](../../src/proxy.rs).
 - Proxy relays decrypted application bytes between the two TLS sessions.
 - HTTP `CONNECT` selects per-request profiles with `X-PolyTLS-Upstream-Profile`.
 - SOCKS5 selects per-request profiles with the username field, either `<profile-name>` or `profile=<profile-name>`.
+- Optional upstream SOCKS5 chaining changes only the proxy→target TCP dial path; MITM TLS origination still happens inside PolyTLS.
 
 ## Diagram
 
@@ -29,7 +30,7 @@ Diagram source: [mitm-component.puml](../diagrams/c4/mitm-component.puml).
    - SOCKS5 greeting/auth plus `CONNECT`; profile selection comes from username/password auth ([src/socks5.rs](../../src/socks5.rs)).
    - Optional: extract `X-PolyTLS-Upstream-Profile` to select an upstream TLS profile ([src/http_connect.rs:7](../../src/http_connect.rs#L7), [src/http_connect.rs:92](../../src/http_connect.rs#L92)).
 2. Select the upstream TLS profile and fetch/build a cached `SslConnector` (unknown profile → `400`, other failures → `502`) ([src/proxy.rs:175](../../src/proxy.rs#L175), [src/profile.rs:158](../../src/profile.rs#L158)).
-3. Dial upstream TCP with a timeout; send `502`/`504` or SOCKS5 failure on connect/timeout failures ([src/proxy.rs:200](../../src/proxy.rs#L200)).
+3. Dial upstream TCP directly, or connect through the configured upstream SOCKS5 proxy and ask it to `CONNECT` to the original target. The same timeout applies; failures return `502`/`504` or SOCKS5 failure depending on the frontend ([src/proxy.rs](../../src/proxy.rs), [src/upstream.rs](../../src/upstream.rs)).
 4. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([src/proxy.rs:216](../../src/proxy.rs#L216), [src/socks5.rs](../../src/socks5.rs)).
 5. Load the selected `UpstreamProfile` (mainly for the ALPN list used on the client-facing TLS acceptor) ([src/proxy.rs:220](../../src/proxy.rs#L220), [src/profile.rs:154](../../src/profile.rs#L154)).
 6. Wrap the client socket in `PrefixedStream(connect.leftover, client)` so the next stage sees a contiguous stream ([src/proxy.rs:227](../../src/proxy.rs#L227), [src/prefixed_stream.rs:1](../../src/prefixed_stream.rs#L1)).
@@ -79,6 +80,22 @@ The proxy can select the upstream TLS ClientHello profile per CONNECT request:
 For SOCKS5, `curl --socks5-hostname` sends a domain target to the proxy. `curl --socks5` resolves locally and sends an IP target; PolyTLS then depends on ClientHello SNI to recover the TLS identity name. Navigating directly to `https://<ip>/...` is not equivalent, because the browser also changes the TLS SNI and HTTP `Host`/HTTP/2 `:authority` identity to the IP.
 
 Profiles are configured in TOML under the `[profiles]` table ([src/config.rs:7](../../src/config.rs#L7)). If the request does not select a profile, the proxy uses `proxy.upstream.default_profile` ([src/config.rs:44](../../src/config.rs#L44)).
+
+## Upstream SOCKS5 chaining
+
+PolyTLS can chain outbound connections through a SOCKS5 proxy configured at `proxy.upstream.proxy`:
+
+```toml
+[proxy.upstream.proxy]
+protocol = "socks5"
+address = "127.0.0.1:9050"
+# username = "chain-user"
+# password = "chain-password"
+```
+
+This is distinct from per-request upstream TLS profile selection. The chained SOCKS5 username/password authenticate PolyTLS to the upstream SOCKS5 proxy. The HTTP `X-PolyTLS-Upstream-Profile` header or frontend SOCKS5 username still selects the TLS ClientHello profile used by PolyTLS when MITM mode originates TLS to the target.
+
+When the original target is a domain, PolyTLS sends a SOCKS5 domain target to the upstream proxy, allowing that proxy to resolve DNS. When the target is an IP literal, PolyTLS sends an IPv4 or IPv6 SOCKS5 target.
 
 ## Why Chrome/Chromium profile is the highest fidelity
 PolyTLS originates upstream TLS using BoringSSL (via the Rust `boring` crate) ([src/profile.rs](../../src/profile.rs)). Chromium-based browsers also use BoringSSL, so the `chrome-*` upstream profile is largely configuring the *same* TLS stack that real Chrome uses. In practice this makes Chrome/Chromium the easiest profile to get close to for JA3/JA4, while Firefox (NSS) and Safari (Apple TLS) can only be approximated within BoringSSL’s feature set.

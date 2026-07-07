@@ -48,6 +48,16 @@ pub struct UpstreamConfig {
     pub insecure_skip_verify: Option<bool>,
     /// Disables proxy→upstream hostname verification (lab use only).
     pub verify_hostname: Option<bool>,
+    /// Optional chained proxy for outbound proxy→upstream TCP connections.
+    pub proxy: Option<UpstreamProxyConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpstreamProxyConfig {
+    pub protocol: String,
+    pub address: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

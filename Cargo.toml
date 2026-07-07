@@ -12,6 +12,7 @@ boring = { version = "5.1.0" }
 boring-sys = { version = "5.1.0" }
 brotli = "8"
 clap = { version = "4", features = ["derive"] }
+config_rs = { package = "config", version = "0.15", default-features = false, features = ["toml"] }
 flate2 = "1"
 foreign-types = "0.5"
 gethostname = "1.1.0"
@@ -29,7 +30,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-boring = { version = "5.0.0"}
 tokio-util = { version = "0.7", features = ["codec"] }
-toml = "1.1.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zstd = "0.13"

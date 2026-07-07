@@ -148,6 +148,33 @@ Or disable proxy→upstream verification entirely (lab only):
 cargo run -- --config config/example.toml --upstream-insecure-skip-verify
 ```
 
+### Environment config overrides
+
+Config files are loaded through `config-rs` and can be overridden with `POLYTLS__...` environment variables. Use double underscores for nested fields:
+
+```bash
+POLYTLS__PROXY__LISTEN__ADDRESS=127.0.0.1:1080 \
+POLYTLS__PROXY__MODE=socks5 \
+POLYTLS__PROXY__UPSTREAM__PROXY__ADDRESS=127.0.0.1:9050 \
+cargo run -- --config config/example.toml
+```
+
+Precedence is: config file, then `POLYTLS__...` environment overrides, then explicit CLI flags.
+
+### Chaining through an upstream SOCKS5 proxy
+
+PolyTLS can route outbound proxy→target TCP connections through a configured SOCKS5 proxy:
+
+```toml
+[proxy.upstream.proxy]
+protocol = "socks5"
+address = "127.0.0.1:9050"
+# username = "chain-user"
+# password = "chain-password"
+```
+
+This works with both frontend protocols (`--proxy-protocol http-connect` / `explicit`, or `--proxy-protocol socks5`) and both data-plane modes (`passthrough` or `mitm`). In MITM mode, PolyTLS still terminates client TLS and originates the upstream TLS session itself; the chained SOCKS5 proxy only carries the TCP tunnel to the target.
+
 ### Selecting an upstream TLS profile per request
 
 In HTTP `CONNECT` MITM mode, you can select which upstream TLS profile the proxy uses by adding a header to the `CONNECT` request:

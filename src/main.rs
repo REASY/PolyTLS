@@ -11,6 +11,7 @@ mod proxy;
 mod socks5;
 mod telemetry;
 mod tls_client_hello;
+mod upstream;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -19,7 +20,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::fs;
 use tokio::signal;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +34,9 @@ use crate::profile::{
     DEFAULT_UPSTREAM_PROFILE, UpstreamProfile, UpstreamProfiles, UpstreamVerification,
 };
 use crate::proxy::{ProxyProtocol, ProxySettings};
+use crate::socks5::UpstreamAuth;
 use crate::telemetry::{init_meter_provider, init_otlp_logging};
+use crate::upstream::{Socks5Proxy, UpstreamProxy};
 use boring::ssl::SslVersion;
 use std::collections::HashMap;
 
@@ -156,25 +158,38 @@ async fn main() -> Result<()> {
 }
 
 async fn read_config(args: &Args) -> Result<Option<Config>> {
-    let file_config = if let Some(config_path) = &args.config {
-        let raw = fs::read_to_string(config_path).await.map_err(|e| {
-            error::ErrorKind::Config(format!(
-                "failed to read config {}: {e}",
-                config_path.display()
-            ))
-        })?;
-        let config: Config = match config_path
+    read_config_with_env_source(args.config.as_deref(), None).await
+}
+
+async fn read_config_with_env_source(
+    config_path: Option<&std::path::Path>,
+    env_source: Option<HashMap<String, String>>,
+) -> Result<Option<Config>> {
+    let has_env = env_source
+        .as_ref()
+        .map(|env| env.keys().any(|key| key.starts_with("POLYTLS__")))
+        .unwrap_or_else(|| std::env::vars().any(|(key, _)| key.starts_with("POLYTLS__")));
+
+    if config_path.is_none() && !has_env {
+        return Ok(None);
+    }
+
+    let mut builder = config_rs::Config::builder();
+
+    if let Some(config_path) = config_path {
+        match config_path
             .extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase())
             .as_deref()
         {
-            Some("toml") => toml::from_str(&raw).map_err(|e| {
-                error::ErrorKind::Config(format!(
-                    "failed to parse TOML config {}: {e}",
-                    config_path.display()
-                ))
-            })?,
+            Some("toml") => {
+                builder = builder.add_source(
+                    config_rs::File::from(config_path)
+                        .format(config_rs::FileFormat::Toml)
+                        .required(true),
+                );
+            }
             x => {
                 return Err(error::ErrorKind::Config(format!(
                     "unsupported config format {x:?} for {} (expected .toml)",
@@ -182,12 +197,26 @@ async fn read_config(args: &Args) -> Result<Option<Config>> {
                 ))
                 .into());
             }
-        };
-        Some(config)
+        }
+    }
+
+    let env = config_rs::Environment::with_prefix("POLYTLS")
+        .separator("__")
+        .ignore_empty(true)
+        .try_parsing(true);
+    let env = if let Some(env_source) = env_source {
+        env.source(Some(env_source))
     } else {
-        None
+        env
     };
-    Ok(file_config)
+
+    builder = builder.add_source(env);
+
+    builder
+        .build()
+        .and_then(|cfg| cfg.try_deserialize::<Config>())
+        .map(Some)
+        .map_err(|e| error::ErrorKind::Config(format!("failed to load config: {e}")).into())
 }
 
 async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<ProxySettings> {
@@ -219,10 +248,13 @@ async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<
         })
         .unwrap_or(ModeSelection::Passthrough);
 
+    let upstream = init_upstream_proxy(file_config.as_ref())?;
+
     let settings = match mode {
         ModeSelection::Passthrough => ProxySettings {
             protocol,
             mode: proxy::ProxyMode::Passthrough,
+            upstream,
         },
         ModeSelection::Mitm => {
             let (ca_key_path, ca_cert_path, leaf_ttl_secs) = file_config
@@ -301,6 +333,7 @@ async fn init_proxy_settings(args: Args, file_config: Option<Config>) -> Result<
                     upstream_profiles,
                     upstream_verification,
                 }),
+                upstream,
             }
         }
     };
@@ -323,6 +356,65 @@ fn parse_proxy_protocol(input: &str) -> Result<ProxyProtocol> {
         "socks5" | "socks" => Ok(ProxyProtocol::Socks5),
         other => Err(error::ErrorKind::Config(format!(
             "unsupported proxy.mode={other:?} (expected \"explicit\" or \"socks5\")"
+        ))
+        .into()),
+    }
+}
+
+fn init_upstream_proxy(file_config: Option<&Config>) -> Result<UpstreamProxy> {
+    let Some(proxy) = file_config
+        .and_then(|c| c.proxy.upstream.as_ref())
+        .and_then(|u| u.proxy.as_ref())
+    else {
+        return Ok(UpstreamProxy::Direct);
+    };
+
+    parse_upstream_proxy_config(proxy)
+}
+
+fn parse_upstream_proxy_config(cfg: &config::UpstreamProxyConfig) -> Result<UpstreamProxy> {
+    let protocol = cfg.protocol.trim().to_ascii_lowercase();
+    match protocol.as_str() {
+        "socks5" | "socks" => {
+            let address = cfg.address.trim();
+            if address.is_empty() {
+                return Err(error::ErrorKind::Config(
+                    "proxy.upstream.proxy.address must not be empty".to_string(),
+                )
+                .into());
+            }
+
+            let auth = match (&cfg.username, &cfg.password) {
+                (Some(username), password) => {
+                    let username = username.trim();
+                    if username.is_empty() {
+                        return Err(error::ErrorKind::Config(
+                            "proxy.upstream.proxy.username must not be empty".to_string(),
+                        )
+                        .into());
+                    }
+                    Some(UpstreamAuth {
+                        username: username.to_string(),
+                        password: password.clone().unwrap_or_default(),
+                    })
+                }
+                (None, Some(_)) => {
+                    return Err(error::ErrorKind::Config(
+                        "proxy.upstream.proxy.username is required when password is set"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                (None, None) => None,
+            };
+
+            Ok(UpstreamProxy::Socks5(Socks5Proxy {
+                address: address.to_string(),
+                auth,
+            }))
+        }
+        other => Err(error::ErrorKind::Config(format!(
+            "unsupported proxy.upstream.proxy.protocol={other:?} (expected \"socks5\")"
         ))
         .into()),
     }
@@ -491,6 +583,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_upstream_proxy_config_accepts_socks5_auth() {
+        let cfg = config::UpstreamProxyConfig {
+            protocol: "socks5".to_string(),
+            address: "127.0.0.1:9050".to_string(),
+            username: Some("chain-user".to_string()),
+            password: Some("chain-pass".to_string()),
+        };
+
+        let proxy = parse_upstream_proxy_config(&cfg).expect("upstream proxy should parse");
+
+        let UpstreamProxy::Socks5(proxy) = proxy else {
+            panic!("expected SOCKS5 upstream proxy");
+        };
+        assert_eq!(proxy.address, "127.0.0.1:9050");
+        let auth = proxy.auth.expect("auth should be configured");
+        assert_eq!(auth.username, "chain-user");
+        assert_eq!(auth.password, "chain-pass");
+    }
+
+    #[test]
+    fn parse_upstream_proxy_config_rejects_password_without_username() {
+        let cfg = config::UpstreamProxyConfig {
+            protocol: "socks5".to_string(),
+            address: "127.0.0.1:9050".to_string(),
+            username: None,
+            password: Some("chain-pass".to_string()),
+        };
+
+        let err =
+            parse_upstream_proxy_config(&cfg).expect_err("password without username should fail");
+        match err.kind() {
+            error::ErrorKind::Config(msg) => {
+                assert!(msg.contains("username is required"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn apply_upstream_profile_config_overrides_selected_fields() {
         let base = UpstreamProfile::chrome_143_macos_arm64();
         let cfg = config::UpstreamProfileConfig {
@@ -635,6 +766,87 @@ address = "127.0.0.1:8080"
             error::ErrorKind::Config(msg) => assert!(msg.contains("unsupported config format")),
             other => panic!("expected config error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_config_returns_none_without_file_or_env() {
+        let cfg = read_config_with_env_source(None, Some(HashMap::new()))
+            .await
+            .expect("empty config sources should not fail");
+
+        assert!(cfg.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_config_applies_polytls_env_overrides() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[proxy]
+mode = "explicit"
+
+[proxy.listen]
+address = "127.0.0.1:8080"
+
+[proxy.upstream]
+default_profile = "chrome-143-macos-arm64"
+insecure_skip_verify = false
+"#,
+        )
+        .expect("write config");
+
+        let env = HashMap::from([
+            ("POLYTLS__PROXY__MODE".to_string(), "socks5".to_string()),
+            (
+                "POLYTLS__PROXY__LISTEN__ADDRESS".to_string(),
+                "127.0.0.1:1080".to_string(),
+            ),
+            (
+                "POLYTLS__PROXY__UPSTREAM__DEFAULT_PROFILE".to_string(),
+                "firefox-145-macos-arm64".to_string(),
+            ),
+            (
+                "POLYTLS__PROXY__UPSTREAM__INSECURE_SKIP_VERIFY".to_string(),
+                "true".to_string(),
+            ),
+            (
+                "POLYTLS__PROXY__UPSTREAM__PROXY__PROTOCOL".to_string(),
+                "socks5".to_string(),
+            ),
+            (
+                "POLYTLS__PROXY__UPSTREAM__PROXY__ADDRESS".to_string(),
+                "127.0.0.1:9050".to_string(),
+            ),
+            (
+                "POLYTLS__PROXY__UPSTREAM__PROXY__USERNAME".to_string(),
+                "chain-user".to_string(),
+            ),
+            (
+                "POLYTLS__PROXY__UPSTREAM__PROXY__PASSWORD".to_string(),
+                "chain-pass".to_string(),
+            ),
+        ]);
+
+        let cfg = read_config_with_env_source(Some(&path), Some(env))
+            .await
+            .expect("config should parse")
+            .expect("config should be loaded");
+
+        assert_eq!(cfg.proxy.mode.as_deref(), Some("socks5"));
+        assert_eq!(cfg.proxy.listen.address, "127.0.0.1:1080");
+        let upstream = cfg.proxy.upstream.expect("upstream config");
+        assert_eq!(
+            upstream.default_profile.as_deref(),
+            Some("firefox-145-macos-arm64")
+        );
+        assert_eq!(upstream.insecure_skip_verify, Some(true));
+        let proxy = upstream.proxy.expect("upstream proxy config");
+        assert_eq!(proxy.protocol, "socks5");
+        assert_eq!(proxy.address, "127.0.0.1:9050");
+        assert_eq!(proxy.username.as_deref(), Some("chain-user"));
+        assert_eq!(proxy.password.as_deref(), Some("chain-pass"));
     }
 
     #[tokio::test]

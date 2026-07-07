@@ -68,6 +68,7 @@ Passthrough mode (tunnels TLS end-to-end):
 - Enforces an upstream TCP connect timeout (30s) ([src/proxy.rs](../../src/proxy.rs#L12))
 - Defines upstream target selection policy: HTTP `CONNECT` authority or SOCKS5 destination address is the upstream TCP destination; SNI mismatch is fail-closed in MITM mode ([src/proxy.rs](../../src/proxy.rs#L184), [src/mitm.rs](../../src/mitm.rs#L66))
 - In SOCKS5 MITM mode, the username may select the upstream profile. Domain targets use the SOCKS5 domain as the TLS identity. IP targets require ClientHello SNI; PolyTLS fails closed when SNI is missing.
+- Optionally chains outbound proxy→target TCP connections through a configured upstream SOCKS5 proxy before passthrough relay or upstream TLS origination begins.
 
 #### 2.2.2 Certificate Authority (CA) Manager
 - Loads an existing root CA from disk or generates a new RSA-2048 root CA on first run ([src/ca.rs](../../src/ca.rs#L40))
@@ -87,7 +88,7 @@ Passthrough mode (tunnels TLS end-to-end):
 - Optional (future): upstream connection reuse/pooling (requires L7-aware proxying)
 
 #### 2.2.5 Configuration Manager
-- Loads a TOML config file into [Config](../../src/config.rs#L4) (TOML-only; `.yaml` is not supported)
+- Loads a TOML config file into [Config](../../src/config.rs#L4) through `config-rs`, then overlays `POLYTLS__...` environment variables (TOML-only; `.yaml` is not supported)
 - Provides built-in upstream profiles (`chrome`, `firefox`, `safari`) and optional per-profile overrides from config ([src/main.rs](../../src/main.rs#L294), [src/profile.rs](../../src/profile.rs#L60))
 - Selects upstream profile per request via `X-PolyTLS-Upstream-Profile` on HTTP `CONNECT`, or via the SOCKS5 username ([src/http_connect.rs](../../src/http_connect.rs#L7), [src/socks5.rs](../../src/socks5.rs))
 - Does not implement hot reload (future)
@@ -109,6 +110,7 @@ Passthrough mode (tunnels TLS end-to-end):
 - [x] Upstream target selection: use HTTP `CONNECT` authority or SOCKS5 destination as the upstream TCP destination; enforce SNI mismatch as a policy violation in MITM mode ([src/proxy.rs](../../src/proxy.rs#L184), [src/proxy.rs](../../src/proxy.rs#L220))
 - [x] Enforce request limits: max request bytes (16KiB) + max header count (64) ([src/http_connect.rs](../../src/http_connect.rs#L5))
 - [x] Enforce upstream TCP connect timeout (30s) ([src/proxy.rs](../../src/proxy.rs#L12))
+- [x] Optional upstream SOCKS5 chaining for proxy→target TCP dialing, with no-auth or username/password auth ([src/upstream.rs](../../src/upstream.rs), [src/socks5.rs](../../src/socks5.rs))
 - [ ] Idle timeouts for established tunnels (not implemented)
 - [ ] `Proxy-Authorization` / ACLs (not implemented)
 - [x] Correctly parse `host:port` where `host` may be a DNS name, IPv4 literal, or IPv6 literal in brackets (e.g. `CONNECT [2001:db8::1]:443`) ([src/http_connect.rs](../../src/http_connect.rs#L119))
@@ -250,6 +252,13 @@ insecure_skip_verify = false
 # Lab-only: disable upstream hostname verification.
 verify_hostname = true
 
+# Optional chained SOCKS5 proxy for outbound proxy→target TCP connections.
+# [proxy.upstream.proxy]
+# protocol = "socks5"
+# address = "127.0.0.1:9050"
+# username = "optional-chain-user"
+# password = "optional-chain-password"
+
 [proxy.certificate]
 ca_key_path = "./ca/private.key"
 ca_cert_path = "./ca/certificate.pem"
@@ -261,7 +270,7 @@ Per-request profile selection:
 - SOCKS5 clients may put `<profile-name>` or `profile=<profile-name>` in the username field.
 
 Implementation notes:
-- Config file format is TOML only (enforced by [read_config](../../src/main.rs#L152)); see [config/example.toml](../../config/example.toml#L1).
+- Config file format is TOML only (enforced by [read_config](../../src/main.rs#L152)); `config-rs` overlays `POLYTLS__...` environment variables using double underscores as nesting separators. See [config/example.toml](../../config/example.toml#L1).
 - Built-in profile names are created in [init_default_profiles](../../src/main.rs#L294); profile structs live in [src/profile.rs](../../src/profile.rs#L38).
 
 ### 4.3 API Design
@@ -293,7 +302,7 @@ struct ProxyControl {
 The data plane is implemented as a per-connection async task that performs:
 
 1. Parse HTTP `CONNECT` (and optionally extract `X-PolyTLS-Upstream-Profile`) via [read_connect_request](../../src/http_connect.rs#L36), or parse SOCKS5 `CONNECT` via [src/socks5.rs](../../src/socks5.rs).
-2. Establish an upstream TCP connection with a timeout ([src/proxy.rs](../../src/proxy.rs#L115)).
+2. Establish an upstream TCP connection with a timeout. If `proxy.upstream.proxy` is configured, first establish a SOCKS5 tunnel through that proxy to the original target ([src/proxy.rs](../../src/proxy.rs), [src/upstream.rs](../../src/upstream.rs)).
 3. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([src/proxy.rs](../../src/proxy.rs#L272), [src/socks5.rs](../../src/socks5.rs)).
 4. Relay bytes bidirectionally using `tokio::io::copy_bidirectional` ([src/proxy.rs](../../src/proxy.rs#L134), [src/proxy.rs](../../src/proxy.rs#L259)).
 
