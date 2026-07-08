@@ -15,7 +15,7 @@ enabled = true
 [proxy.upstream]
 # Default upstream TLS profile name used when the client does not provide
 # HTTP `X-PolyTLS-Upstream-Profile` or a SOCKS5 username profile.
-default_profile = "firefox-145-macos-arm64"
+default_profile = "chrome-143-macos-arm64"
 # Optional: override the upstream target (currently unused).
 # default_upstream = "example.com:443"
 #
