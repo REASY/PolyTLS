@@ -89,13 +89,15 @@ PolyTLS can chain outbound connections through a SOCKS5 proxy configured at `pro
 [proxy.upstream.proxy]
 protocol = "socks5"
 address = "127.0.0.1:9050"
+# dns = "proxy" # default
+# dns = "local" # resolve locally, then send an IP target upstream
 # username = "chain-user"
 # password = "chain-password"
 ```
 
 This is distinct from per-request upstream TLS profile selection. The chained SOCKS5 username/password authenticate PolyTLS to the upstream SOCKS5 proxy. The HTTP `X-PolyTLS-Upstream-Profile` header or frontend SOCKS5 username still selects the TLS ClientHello profile used by PolyTLS when MITM mode originates TLS to the target.
 
-When the original target is a domain, PolyTLS sends a SOCKS5 domain target to the upstream proxy, allowing that proxy to resolve DNS. When the target is an IP literal, PolyTLS sends an IPv4 or IPv6 SOCKS5 target.
+When `dns = "proxy"` or `dns` is omitted, PolyTLS sends domain targets to the upstream proxy, allowing that proxy to resolve DNS. When `dns = "local"`, PolyTLS resolves domain targets locally and sends the selected IP address to the upstream SOCKS5 proxy. In MITM mode, this does not change the hostname used for certificate generation, SNI validation, or upstream TLS. When the original target is already an IP literal, PolyTLS sends an IPv4 or IPv6 SOCKS5 target regardless of the DNS policy.
 
 ## Why Chrome/Chromium profile is the highest fidelity
 PolyTLS originates upstream TLS using BoringSSL (via the Rust `boring` crate) ([src/profile.rs](../../src/profile.rs)). Chromium-based browsers also use BoringSSL, so the `chrome-*` upstream profile is largely configuring the *same* TLS stack that real Chrome uses. In practice this makes Chrome/Chromium the easiest profile to get close to for JA3/JA4, while Firefox (NSS) and Safari (Apple TLS) can only be approximated within BoringSSL’s feature set.

@@ -256,6 +256,8 @@ verify_hostname = true
 # [proxy.upstream.proxy]
 # protocol = "socks5"
 # address = "127.0.0.1:9050"
+# dns = "proxy" # default; upstream SOCKS5 proxy resolves domain targets
+# dns = "local" # PolyTLS resolves locally and sends an IP target upstream
 # username = "optional-chain-user"
 # password = "optional-chain-password"
 
@@ -302,7 +304,7 @@ struct ProxyControl {
 The data plane is implemented as a per-connection async task that performs:
 
 1. Parse HTTP `CONNECT` (and optionally extract `X-PolyTLS-Upstream-Profile`) via [read_connect_request](../../src/http_connect.rs#L36), or parse SOCKS5 `CONNECT` via [src/socks5.rs](../../src/socks5.rs).
-2. Establish an upstream TCP connection with a timeout. If `proxy.upstream.proxy` is configured, first establish a SOCKS5 tunnel through that proxy to the original target ([src/proxy.rs](../../src/proxy.rs), [src/upstream.rs](../../src/upstream.rs)).
+2. Establish an upstream TCP connection with a timeout. If `proxy.upstream.proxy` is configured, first establish a SOCKS5 tunnel through that proxy to the original target ([src/proxy.rs](../../src/proxy.rs), [src/upstream.rs](../../src/upstream.rs)). The upstream SOCKS5 `dns` policy controls only the address sent to the chained proxy: `proxy` sends domain targets upstream, while `local` resolves locally and sends an IP target.
 3. Reply `HTTP/1.1 200 Connection Established` for HTTP, or SOCKS5 success for SOCKS5 ([src/proxy.rs](../../src/proxy.rs#L272), [src/socks5.rs](../../src/socks5.rs)).
 4. Relay bytes bidirectionally using `tokio::io::copy_bidirectional` ([src/proxy.rs](../../src/proxy.rs#L134), [src/proxy.rs](../../src/proxy.rs#L259)).
 

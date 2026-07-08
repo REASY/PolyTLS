@@ -36,7 +36,7 @@ use crate::profile::{
 use crate::proxy::{ProxyProtocol, ProxySettings};
 use crate::socks5::UpstreamAuth;
 use crate::telemetry::{init_meter_provider, init_otlp_logging};
-use crate::upstream::{Socks5Proxy, UpstreamProxy};
+use crate::upstream::{Socks5DnsPolicy, Socks5Proxy, UpstreamProxy};
 use boring::ssl::SslVersion;
 use std::collections::HashMap;
 
@@ -407,14 +407,31 @@ fn parse_upstream_proxy_config(cfg: &config::UpstreamProxyConfig) -> Result<Upst
                 }
                 (None, None) => None,
             };
+            let dns = parse_upstream_socks5_dns_policy(cfg.dns.as_deref())?;
 
             Ok(UpstreamProxy::Socks5(Socks5Proxy {
                 address: address.to_string(),
                 auth,
+                dns,
             }))
         }
         other => Err(error::ErrorKind::Config(format!(
             "unsupported proxy.upstream.proxy.protocol={other:?} (expected \"socks5\")"
+        ))
+        .into()),
+    }
+}
+
+fn parse_upstream_socks5_dns_policy(input: Option<&str>) -> Result<Socks5DnsPolicy> {
+    let Some(input) = input else {
+        return Ok(Socks5DnsPolicy::Proxy);
+    };
+
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "proxy" => Ok(Socks5DnsPolicy::Proxy),
+        "local" => Ok(Socks5DnsPolicy::Local),
+        other => Err(error::ErrorKind::Config(format!(
+            "unsupported proxy.upstream.proxy.dns={other:?} (expected \"proxy\" or \"local\")"
         ))
         .into()),
     }
@@ -589,6 +606,7 @@ mod tests {
             address: "127.0.0.1:9050".to_string(),
             username: Some("chain-user".to_string()),
             password: Some("chain-pass".to_string()),
+            dns: Some("local".to_string()),
         };
 
         let proxy = parse_upstream_proxy_config(&cfg).expect("upstream proxy should parse");
@@ -597,6 +615,7 @@ mod tests {
             panic!("expected SOCKS5 upstream proxy");
         };
         assert_eq!(proxy.address, "127.0.0.1:9050");
+        assert_eq!(proxy.dns, crate::upstream::Socks5DnsPolicy::Local);
         let auth = proxy.auth.expect("auth should be configured");
         assert_eq!(auth.username, "chain-user");
         assert_eq!(auth.password, "chain-pass");
@@ -609,6 +628,7 @@ mod tests {
             address: "127.0.0.1:9050".to_string(),
             username: None,
             password: Some("chain-pass".to_string()),
+            dns: None,
         };
 
         let err =

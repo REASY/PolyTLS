@@ -58,6 +58,7 @@ pub struct UpstreamProxyConfig {
     pub address: String,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub dns: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

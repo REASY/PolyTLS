@@ -169,11 +169,15 @@ PolyTLS can route outbound proxy→target TCP connections through a configured S
 [proxy.upstream.proxy]
 protocol = "socks5"
 address = "127.0.0.1:9050"
+# dns = "proxy" # default: upstream SOCKS5 proxy resolves domain targets
+# dns = "local" # optional: PolyTLS resolves locally and sends an IP target upstream
 # username = "chain-user"
 # password = "chain-password"
 ```
 
 This works with both frontend protocols (`--proxy-protocol http-connect` / `explicit`, or `--proxy-protocol socks5`) and both data-plane modes (`passthrough` or `mitm`). In MITM mode, PolyTLS still terminates client TLS and originates the upstream TLS session itself; the chained SOCKS5 proxy only carries the TCP tunnel to the target.
+
+By default, domain targets are sent to the chained SOCKS5 proxy as domains so the upstream proxy performs DNS resolution. Set `dns = "local"` only when you need PolyTLS to resolve the target locally and send the resulting IP address to the chained SOCKS5 proxy; MITM mode still uses the original hostname for certificate generation, SNI validation, and upstream TLS.
 
 ### Selecting an upstream TLS profile per request
 

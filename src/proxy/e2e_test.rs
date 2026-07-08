@@ -803,9 +803,17 @@ fn tcp_target(host: &str, port: u16) -> String {
 }
 
 fn chained_socks5_proxy(addr: SocketAddr) -> crate::upstream::UpstreamProxy {
+    chained_socks5_proxy_with_dns(addr, crate::upstream::Socks5DnsPolicy::Proxy)
+}
+
+fn chained_socks5_proxy_with_dns(
+    addr: SocketAddr,
+    dns: crate::upstream::Socks5DnsPolicy,
+) -> crate::upstream::UpstreamProxy {
     crate::upstream::UpstreamProxy::Socks5(crate::upstream::Socks5Proxy {
         address: addr.to_string(),
         auth: None,
+        dns,
     })
 }
 
@@ -1073,6 +1081,52 @@ async fn http_passthrough_chains_via_upstream_socks5() {
         "unexpected response: {resp:?}"
     );
     assert!(resp.ends_with("http-chain-ok"), "unexpected body: {resp:?}");
+}
+
+#[tokio::test]
+async fn http_passthrough_chains_via_upstream_socks5_with_local_dns() {
+    let origin_ca = TestCa::new("e2e-origin-ca").await;
+    let origin = TestTlsOrigin::spawn_http(
+        "localhost",
+        &origin_ca,
+        vec!["http/1.1".to_string()],
+        "http-chain-local-dns-ok",
+    )
+    .await;
+    let upstream_socks5 = TestSocks5Upstream::spawn().await;
+    let proxy = TestProxy::spawn(ProxySettings {
+        protocol: ProxyProtocol::HttpConnect,
+        mode: ProxyMode::Passthrough,
+        upstream: chained_socks5_proxy_with_dns(
+            upstream_socks5.addr(),
+            crate::upstream::Socks5DnsPolicy::Local,
+        ),
+    })
+    .await;
+
+    let client = TestClient::new(proxy.addr(), Some(origin_ca.ca_cert_path_str()));
+    let resp = client
+        .get("localhost", origin.addr().port(), &["http/1.1"], &[])
+        .await;
+
+    let req = upstream_socks5.next_request().await;
+    assert_eq!(req.address_kind, AddressKind::Ip);
+    assert!(
+        req.host.parse::<std::net::IpAddr>().is_ok(),
+        "local DNS should send an IP target upstream, got {:?}",
+        req.host
+    );
+    assert_eq!(req.port, origin.addr().port());
+
+    let resp = String::from_utf8_lossy(&resp);
+    assert!(
+        resp.starts_with("HTTP/1.1 200 OK\r\n"),
+        "unexpected response: {resp:?}"
+    );
+    assert!(
+        resp.ends_with("http-chain-local-dns-ok"),
+        "unexpected body: {resp:?}"
+    );
 }
 
 #[tokio::test]
